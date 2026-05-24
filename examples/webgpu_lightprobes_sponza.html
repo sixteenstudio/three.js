@@ -14,7 +14,7 @@
 
 		<div id="info">
 			<a href="https://threejs.org" target="_blank" rel="noopener">three.js</a> - light probe volume (Sponza)<br/>
-			WASD to move, mouse to look
+			WASD to move, mouse to look &middot; floating sphere = dynamic object lit by the probe grid
 		</div>
 
 		<progress id="progressBar" value="0" max="100" style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%)"></progress>
@@ -46,6 +46,7 @@
 
 			let camera, scene, renderer, controls, timer;
 			let probes = null, probesHelper = null;
+			let movingSphere = null;
 			let modelSize = null;
 			let dirLight = null, sky = null;
 			const sun = new THREE.Vector3();
@@ -175,8 +176,23 @@
 					lightAzimuth: - 45,
 					lightElevation: 55,
 					lightIntensity: 50.0,
-					shadows: true
+					shadows: true,
+					dynamicSphere: true
 				};
+
+				// Demo: a dynamic object that travels through the probe volume. Unlike the
+				// static Sponza geometry it is NOT baked into the probes — it is lit at runtime
+				// by sampling the grid at its current world position, so its shading shifts as it
+				// moves. This is the canonical "probes light moving objects" use case.
+				movingSphere = new THREE.Mesh(
+					new THREE.SphereGeometry( 0.6, 32, 16 ),
+					new THREE.MeshStandardMaterial( { color: 0xcccccc, roughness: 0.7, metalness: 0.0 } )
+				);
+				movingSphere.castShadow = true;
+				movingSphere.receiveShadow = true;
+				movingSphere.userData.center = new THREE.Vector3( params.boundsX, params.boundsY, params.boundsZ );
+				movingSphere.userData.half = new THREE.Vector3( params.sizeX, params.sizeY, params.sizeZ ).multiplyScalar( 0.5 );
+				scene.add( movingSphere );
 
 				function updateLightPosition() {
 
@@ -242,12 +258,17 @@
 
 						}
 
+						// Keep the dynamic sphere out of the bake so it isn't burned into the probes.
+						if ( movingSphere ) movingSphere.visible = false;
+
 						probes.bake( renderer, scene, {
 							cubemapSize: 32,
 							near: 0.05,
 							far: probeFar
 						} );
 						probes.visible = params.enabled;
+
+						if ( movingSphere ) movingSphere.visible = params.dynamicSphere;
 
 						if ( ! probesHelper ) {
 
@@ -274,6 +295,12 @@
 				gui.add( params, 'enabled' ).name( 'GI' ).onChange( ( value ) => {
 
 					if ( probes ) probes.visible = value;
+
+				} );
+
+				gui.add( params, 'dynamicSphere' ).name( 'Dynamic Sphere' ).onChange( ( value ) => {
+
+					if ( movingSphere ) movingSphere.visible = value;
 
 				} );
 
@@ -383,6 +410,22 @@
 
 				timer.update( timestamp );
 				controls.update( timer.getDelta() );
+
+				if ( movingSphere !== null && movingSphere.visible ) {
+
+					const t = timer.getElapsed();
+					const { center, half } = movingSphere.userData;
+
+					// Sweep along the corridor (X) and bob up/down (Y), staying inside the probe
+					// volume so the lookup always interpolates real probes.
+					movingSphere.position.set(
+						center.x + Math.sin( t * 0.6 ) * half.x * 0.7,
+						center.y + Math.sin( t * 1.5 ) * half.y * 0.55,
+						center.z
+					);
+
+				}
+
 				renderer.render( scene, camera );
 
 			}
