@@ -162,6 +162,14 @@ class RenderList {
 		this.lightsArray = [];
 
 		/**
+		 * The scene's light probe grids stored in an array. This array
+		 * is used to setup the lights node.
+		 *
+		 * @type {Array<Object3D>}
+		 */
+		this.lightProbeGridsArray = [];
+
+		/**
 		 * The scene.
 		 *
 		 * @type {Scene}
@@ -202,6 +210,7 @@ class RenderList {
 		this.bundles.length = 0;
 
 		this.lightsArray.length = 0;
+		this.lightProbeGridsArray.length = 0;
 
 		this.occlusionQueryCount = 0;
 
@@ -354,6 +363,17 @@ class RenderList {
 	}
 
 	/**
+	 * Pushes a light probe grid into the render list.
+	 *
+	 * @param {Object3D} grid - The light probe grid.
+	 */
+	pushLightProbeGrid( grid ) {
+
+		this.lightProbeGridsArray.push( grid );
+
+	}
+
+	/**
 	 * Sorts the internal render lists.
 	 *
 	 * @param {?function(any, any): number} customOpaqueSort - A custom sort function for opaque objects.
@@ -376,6 +396,7 @@ class RenderList {
 		// update lights
 
 		this.lightsNode.setLights( this.lightsArray );
+		this.lightsNode.setLightProbeGrids( this.lightProbeGridsArray );
 
 		// Clear references from inactive renderItems in the list
 

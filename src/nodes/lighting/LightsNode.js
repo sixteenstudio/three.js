@@ -2,6 +2,7 @@ import Node from '../core/Node.js';
 import { nodeObject, property, vec3 } from '../tsl/TSLBase.js';
 import { hashArray } from '../core/NodeUtils.js';
 import { warn } from '../../utils.js';
+import LightProbeGridNode from './LightProbeGridNode.js';
 
 const sortLights = ( lights ) => {
 
@@ -26,6 +27,7 @@ const getLightNodeById = ( id, lightNodes ) => {
 };
 
 const _lightsNodeRef = /*@__PURE__*/ new WeakMap();
+const _lightProbeGridNodeRef = /*@__PURE__*/ new WeakMap();
 const _hashData = [];
 
 /**
@@ -78,6 +80,14 @@ class LightsNode extends Node {
 		 * @type {Array<Light>}
 		 */
 		this._lights = [];
+
+		/**
+		 * An array representing the light probe grids in the scene.
+		 *
+		 * @private
+		 * @type {Array<Object3D>}
+		 */
+		this._lightProbeGrids = [];
 
 		/**
 		 * For each light in the scene, this node will create a
@@ -133,6 +143,12 @@ class LightsNode extends Node {
 				_hashData.push( hashMap, hashColorNode );
 
 			}
+
+		}
+
+		if ( this._lightProbeGrids.length > 0 ) {
+
+			_hashData.push( this._lightProbeGrids.length );
 
 		}
 
@@ -241,6 +257,24 @@ class LightsNode extends Node {
 				lightNodes.push( lightNode );
 
 			}
+
+		}
+
+		for ( const lightProbeGrid of this._lightProbeGrids ) {
+
+			// Skip grids that have not been baked yet ( mirrors WebGLRenderer.findLightProbeGrid )
+			if ( lightProbeGrid.texture === null ) continue;
+
+			let gridNode = _lightProbeGridNodeRef.get( lightProbeGrid );
+
+			if ( gridNode === undefined ) {
+
+				gridNode = new LightProbeGridNode( lightProbeGrid );
+				_lightProbeGridNodeRef.set( lightProbeGrid, gridNode );
+
+			}
+
+			lightNodes.push( gridNode );
 
 		}
 
@@ -395,6 +429,23 @@ class LightsNode extends Node {
 	}
 
 	/**
+	 * Configures this node with an array of light probe grids.
+	 *
+	 * @param {Array<Object3D>} lightProbeGrids - An array of light probe grids.
+	 * @return {LightsNode} A reference to this node.
+	 */
+	setLightProbeGrids( lightProbeGrids ) {
+
+		this._lightProbeGrids = lightProbeGrids;
+
+		this._lightNodes = null;
+		this._lightNodesHash = null;
+
+		return this;
+
+	}
+
+	/**
 	 * Returns an array of the scene's lights.
 	 *
 	 * @return {Array<Light>} The scene's lights.
@@ -412,7 +463,7 @@ class LightsNode extends Node {
 	 */
 	get hasLights() {
 
-		return this._lights.length > 0;
+		return this._lights.length > 0 || this._lightProbeGrids.length > 0;
 
 	}
 

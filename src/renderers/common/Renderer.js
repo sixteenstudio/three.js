@@ -942,6 +942,10 @@ class Renderer {
 
 					renderList.pushLight( object );
 
+				} else if ( object.isLightProbeGrid && object.layers.test( camera.layers ) ) {
+
+					renderList.pushLightProbeGrid( object );
+
 				}
 
 			} );
@@ -3129,6 +3133,10 @@ class Renderer {
 			} else if ( object.isLight ) {
 
 				renderList.pushLight( object );
+
+			} else if ( object.isLightProbeGrid ) {
+
+				renderList.pushLightProbeGrid( object );
 
 			} else if ( object.isSprite ) {
 
