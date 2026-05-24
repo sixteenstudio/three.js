@@ -410,69 +410,64 @@ function _ensureGPUResources( cubemapSize ) {
 			const accum8 = vec3( 0.0 ).toVar();
 			const totalWeight = float( 0.0 ).toVar();
 
-			Loop( 6, ( { i: face } ) => {
+			// Nested loops MUST be expressed as a single compacted Loop() so each level
+			// gets a distinct iteration variable ( i, j, k ). Three separate Loop() calls
+			// would each generate a variable named `i`, shadowing the outer indices.
+			Loop( 6, cubemapSize, cubemapSize, ( { i: face, j: iy, k: ix } ) => {
 
-				Loop( cubemapSize, ( { i: iy } ) => {
+				// WebGL cubemaps have a left-handed orientation (flip = -1)
+				const col = float( ix ).add( 0.5 ).mul( pixelSize ).sub( 1.0 );
+				const row = float( 1.0 ).sub( float( iy ).add( 0.5 ).mul( pixelSize ) );
 
-					Loop( cubemapSize, ( { i: ix } ) => {
+				const coord = vec3( 0.0 ).toVar();
 
-						// WebGL cubemaps have a left-handed orientation (flip = -1)
-						const col = float( ix ).add( 0.5 ).mul( pixelSize ).sub( 1.0 );
-						const row = float( 1.0 ).sub( float( iy ).add( 0.5 ).mul( pixelSize ) );
+				If( face.equal( 0 ), () => {
 
-						const coord = vec3( 0.0 ).toVar();
+					coord.assign( vec3( 1.0, row, col.negate() ) );
 
-						If( face.equal( 0 ), () => {
+				} ).ElseIf( face.equal( 1 ), () => {
 
-							coord.assign( vec3( 1.0, row, col.negate() ) );
+					coord.assign( vec3( - 1.0, row, col ) );
 
-						} ).ElseIf( face.equal( 1 ), () => {
+				} ).ElseIf( face.equal( 2 ), () => {
 
-							coord.assign( vec3( - 1.0, row, col ) );
+					coord.assign( vec3( col, 1.0, row.negate() ) );
 
-						} ).ElseIf( face.equal( 2 ), () => {
+				} ).ElseIf( face.equal( 3 ), () => {
 
-							coord.assign( vec3( col, 1.0, row.negate() ) );
+					coord.assign( vec3( col, - 1.0, row ) );
 
-						} ).ElseIf( face.equal( 3 ), () => {
+				} ).ElseIf( face.equal( 4 ), () => {
 
-							coord.assign( vec3( col, - 1.0, row ) );
+					coord.assign( vec3( col, row, 1.0 ) );
 
-						} ).ElseIf( face.equal( 4 ), () => {
+				} ).Else( () => {
 
-							coord.assign( vec3( col, row, 1.0 ) );
-
-						} ).Else( () => {
-
-							coord.assign( vec3( col.negate(), row, - 1.0 ) );
-
-						} );
-
-						const lengthSq = coord.dot( coord );
-						const weight = float( 4.0 ).div( lengthSq.sqrt().mul( lengthSq ) );
-						totalWeight.addAssign( weight );
-
-						const dir = coord.normalize();
-						const cw = _shEnvNode.sample( coord ).rgb.mul( weight );
-
-						// band 0
-						accum0.addAssign( cw.mul( 0.282095 ) );
-
-						// band 1
-						accum1.addAssign( cw.mul( dir.y.mul( 0.488603 ) ) );
-						accum2.addAssign( cw.mul( dir.z.mul( 0.488603 ) ) );
-						accum3.addAssign( cw.mul( dir.x.mul( 0.488603 ) ) );
-
-						// band 2
-						accum4.addAssign( cw.mul( dir.x.mul( dir.y ).mul( 1.092548 ) ) );
-						accum5.addAssign( cw.mul( dir.y.mul( dir.z ).mul( 1.092548 ) ) );
-						accum6.addAssign( cw.mul( dir.z.mul( dir.z ).mul( 3.0 ).sub( 1.0 ).mul( 0.315392 ) ) );
-						accum7.addAssign( cw.mul( dir.x.mul( dir.z ).mul( 1.092548 ) ) );
-						accum8.addAssign( cw.mul( dir.x.mul( dir.x ).sub( dir.y.mul( dir.y ) ).mul( 0.546274 ) ) );
-
-					} );
+					coord.assign( vec3( col.negate(), row, - 1.0 ) );
 
 				} );
+
+				const lengthSq = coord.dot( coord );
+				const weight = float( 4.0 ).div( lengthSq.sqrt().mul( lengthSq ) );
+				totalWeight.addAssign( weight );
+
+				const dir = coord.normalize();
+				const cw = _shEnvNode.sample( coord ).rgb.mul( weight );
+
+				// band 0
+				accum0.addAssign( cw.mul( 0.282095 ) );
+
+				// band 1
+				accum1.addAssign( cw.mul( dir.y.mul( 0.488603 ) ) );
+				accum2.addAssign( cw.mul( dir.z.mul( 0.488603 ) ) );
+				accum3.addAssign( cw.mul( dir.x.mul( 0.488603 ) ) );
+
+				// band 2
+				accum4.addAssign( cw.mul( dir.x.mul( dir.y ).mul( 1.092548 ) ) );
+				accum5.addAssign( cw.mul( dir.y.mul( dir.z ).mul( 1.092548 ) ) );
+				accum6.addAssign( cw.mul( dir.z.mul( dir.z ).mul( 3.0 ).sub( 1.0 ).mul( 0.315392 ) ) );
+				accum7.addAssign( cw.mul( dir.x.mul( dir.z ).mul( 1.092548 ) ) );
+				accum8.addAssign( cw.mul( dir.x.mul( dir.x ).sub( dir.y.mul( dir.y ) ).mul( 0.546274 ) ) );
 
 			} );
 
