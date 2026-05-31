@@ -60,7 +60,7 @@
 				rotationSpeed: 0.3,
 				lightIntensity: 700,
 				shadowIntensity: 0.95,
-				fog: false,
+				fog: true,
 				drop: true,
 				spawnRate: 0.45
 			};
@@ -70,8 +70,8 @@
 			const causticDispersion = uniform( 0.004 );
 			const causticIntensity = uniform( 25 );
 			const checkerScale = uniform( 1 );
-			const fogDensity = uniform( 1 );
-			const fogIntensity = uniform( 0.6 );
+			const fogDensity = uniform( 0.6 );
+			const fogIntensity = uniform( 0.18 );
 
 			let causticMap, marbleGeometry, marbleMaterial;
 			let spawnTimer = 0, lastTime = 0;
@@ -212,7 +212,8 @@
 				// volumetric fog: a fog volume on its own layer, lit ( and caustic-shadowed ) by the point lights
 
 				const fogMaterial = new THREE.VolumeNodeMaterial();
-				fogMaterial.steps = 12; // uniform density; fog amount is controlled by the composite intensity
+				fogMaterial.steps = 12;
+				fogMaterial.scatteringNode = Fn( () => fogDensity ); // uniform density across the volume
 
 				const fog = new THREE.Mesh( new THREE.BoxGeometry( 28, 15, 28 ), fogMaterial );
 				fog.position.y = 7.5;
