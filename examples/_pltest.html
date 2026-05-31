@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+	<head><title>pltest</title><meta charset="utf-8"><link type="text/css" rel="stylesheet" href="example.css"></head>
+	<body>
+		<script type="importmap">
+			{ "imports": { "three": "../build/three.webgpu.js", "three/webgpu": "../build/three.webgpu.js", "three/tsl": "../build/three.tsl.js", "three/addons/": "./jsm/" } }
+		</script>
+		<script type="module">
+
+			import * as THREE from 'three/webgpu';
+			import { PointLightNode } from 'three/webgpu';
+			import { positionLocal, vec3, vec4, float } from 'three/tsl';
+			import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+			import { VolumetricPointLight } from 'three/addons/lights/VolumetricPointLight.js';
+
+			const camera = new THREE.PerspectiveCamera( 45, innerWidth / innerHeight, 0.5, 100 );
+			camera.position.set( 0, 8, 12 );
+
+			const scene = new THREE.Scene();
+			scene.add( new THREE.AmbientLight( 0xffffff, 0.15 ) );
+
+			const floor = new THREE.Mesh( new THREE.PlaneGeometry( 40, 40 ), new THREE.MeshStandardMaterial( { color: 0x888888 } ) );
+			floor.rotation.x = - Math.PI / 2;
+			floor.receiveShadow = true;
+			scene.add( floor );
+
+			// caster: box with a high-contrast STRIPE castShadowNode
+			const mat = new THREE.MeshPhysicalNodeMaterial( { transmission: 1, ior: 1.5, roughness: 0.05, transparent: true } );
+			const stripes = positionLocal.y.mul( 4 ).floor().mod( 2 ).mix( float( 0.1 ), float( 1.0 ) );
+			mat.castShadowNode = vec4( vec3( stripes ), 0.95 );
+
+			const box = new THREE.Mesh( new THREE.BoxGeometry( 3, 3, 3 ), mat );
+			box.position.set( 0, 3, 0 );
+			box.castShadow = true;
+			scene.add( box );
+
+			const light = new VolumetricPointLight( 0xffffff, 300 );
+			light.position.set( 0.001, 9, 0.001 );
+			light.castShadow = true;
+			light.shadow.mapSize.set( 1024, 1024 );
+			light.shadow.camera.near = 0.5;
+			light.shadow.camera.far = 40;
+			light.shadow.bias = - 0.003;
+			scene.add( light );
+
+			const renderer = new THREE.WebGPURenderer( { antialias: true } );
+			renderer.library.addLight( PointLightNode, VolumetricPointLight );
+			renderer.setSize( innerWidth, innerHeight );
+			renderer.shadowMap.enabled = true;
+			renderer.shadowMap.transmitted = true;
+			renderer.toneMapping = THREE.AgXToneMapping;
+			document.body.appendChild( renderer.domElement );
+
+			const controls = new OrbitControls( camera, renderer.domElement );
+			controls.target.set( 0, 1, 0 );
+			controls.update();
+
+			renderer.setAnimationLoop( () => renderer.render( scene, camera ) );
+
+		</script>
+	</body>
+</html>
