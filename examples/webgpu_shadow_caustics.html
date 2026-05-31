@@ -55,6 +55,7 @@
 				rotationSpeed: 0.3,
 				lightIntensity: 700,
 				shadowIntensity: 0.95,
+				shadowQuality: 2048,
 				drop: true,
 				spawnRate: 0.45
 			};
@@ -172,7 +173,7 @@
 					light.distance = 0;
 					light.castShadow = true;
 					light.shadow.mapType = THREE.HalfFloatType; // HDR caustics
-					light.shadow.mapSize.set( 1024, 1024 );
+					light.shadow.mapSize.setScalar( params.shadowQuality );
 					light.shadow.camera.near = 1;
 					light.shadow.camera.far = 40;
 					light.shadow.bias = - 0.003;
@@ -231,6 +232,7 @@
 
 				const lighting = gui.addFolder( 'Lights' );
 				lighting.add( params, 'lightIntensity', 0, 2000, 10 ).name( 'intensity' ).onChange( v => lights.forEach( l => l.intensity = v ) );
+				lighting.add( params, 'shadowQuality', { '1024': 1024, '2048': 2048, '4096': 4096 } ).name( 'shadow quality' ).onChange( v => lights.forEach( l => { l.shadow.mapSize.setScalar( v ); l.shadow.needsUpdate = true; } ) );
 
 				const animation = gui.addFolder( 'Animation' );
 				animation.add( params, 'rotationSpeed', 0, 2, 0.01 ).name( 'rotation' );
