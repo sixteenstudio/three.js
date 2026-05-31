@@ -1,5 +1,5 @@
 import { PointLight, PointShadowNode, Vector3, Color, DepthTexture, HalfFloatType, RGBAFormat, LinearFilter } from 'three/webgpu';
-import { Fn, If, int, mix, reference, texture, uniform, vec2, shadowPositionWorld } from 'three/tsl';
+import { int, mix, reference, texture, uniform, vec2, shadowPositionWorld } from 'three/tsl';
 
 /**
  * Cube face look directions and up vectors ( standard OpenGL cube-map convention ), matched
@@ -64,34 +64,41 @@ class VolumetricPointShadowNode extends PointShadowNode {
 
 		const intensity = reference( 'intensity', 'float', shadow );
 
-		const sampleCaustic = Fn( ( [ direction ] ) => {
+		// Select the cube face and its uv from the dominant axis of the light -> fragment
+		// direction. Kept branchless ( `select` rather than `If` ) so the array texture is
+		// sampled inline in the host material's node graph: a `setLayout` function would
+		// hide the sampler binding and break the volumetric / pass compile contexts.
+		const direction = shadowPositionWorld.sub( this.lightPosition );
+		const absolute = direction.abs();
 
-			const absolute = direction.abs().toVar();
-			const face = int( 0 ).toVar();
-			const uv = vec2( 0 ).toVar();
+		const axisX = absolute.x.greaterThanEqual( absolute.y ).and( absolute.x.greaterThanEqual( absolute.z ) );
+		const axisY = absolute.y.greaterThanEqual( absolute.z );
 
-			If( absolute.x.greaterThanEqual( absolute.y ).and( absolute.x.greaterThanEqual( absolute.z ) ), () => {
+		const face = axisX.select(
+			direction.x.greaterThan( 0 ).select( int( 0 ), int( 1 ) ),
+			axisY.select(
+				direction.y.greaterThan( 0 ).select( int( 2 ), int( 3 ) ),
+				direction.z.greaterThan( 0 ).select( int( 4 ), int( 5 ) )
+			)
+		);
 
-				If( direction.x.greaterThan( 0 ), () => { face.assign( 0 ); uv.assign( vec2( direction.z.negate(), direction.y.negate() ).div( absolute.x ) ); } )
-					.Else( () => { face.assign( 1 ); uv.assign( vec2( direction.z, direction.y.negate() ).div( absolute.x ) ); } );
+		const uv = axisX.select(
+			direction.x.greaterThan( 0 )
+				.select( vec2( direction.z.negate(), direction.y.negate() ), vec2( direction.z, direction.y.negate() ) )
+				.div( absolute.x ),
+			axisY.select(
+				direction.y.greaterThan( 0 )
+					.select( vec2( direction.x, direction.z ), vec2( direction.x, direction.z.negate() ) )
+					.div( absolute.y ),
+				direction.z.greaterThan( 0 )
+					.select( vec2( direction.x, direction.y.negate() ), vec2( direction.x.negate(), direction.y.negate() ) )
+					.div( absolute.z )
+			)
+		);
 
-			} ).ElseIf( absolute.y.greaterThanEqual( absolute.z ), () => {
-
-				If( direction.y.greaterThan( 0 ), () => { face.assign( 2 ); uv.assign( vec2( direction.x, direction.z ).div( absolute.y ) ); } )
-					.Else( () => { face.assign( 3 ); uv.assign( vec2( direction.x, direction.z.negate() ).div( absolute.y ) ); } );
-
-			} ).Else( () => {
-
-				If( direction.z.greaterThan( 0 ), () => { face.assign( 4 ); uv.assign( vec2( direction.x, direction.y.negate() ).div( absolute.z ) ); } )
-					.Else( () => { face.assign( 5 ); uv.assign( vec2( direction.x.negate(), direction.y.negate() ).div( absolute.z ) ); } );
-
-			} );
-
-			return texture( this.shadowMap.texture, uv.mul( 0.5 ).add( 0.5 ) ).depth( face );
-
-		} ).setLayout( { name: 'volumetricPointCaustic_' + this.light.id, type: 'vec4', inputs: [ { name: 'direction', type: 'vec3' } ] } );
-
-		const color = sampleCaustic( shadowPositionWorld.sub( this.lightPosition ) ).toVar();
+		// the render target's framebuffer maps to texture space with a flipped V, so
+		// invert the vertical component to keep the projection aligned with the caster.
+		const color = texture( this.shadowMap.texture, uv.mul( vec2( 0.5, - 0.5 ) ).add( 0.5 ) ).depth( face ).toVar();
 
 		return mix( 1, color.rgb, intensity.mul( color.a ) );
 

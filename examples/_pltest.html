@@ -9,12 +9,12 @@
 
 			import * as THREE from 'three/webgpu';
 			import { PointLightNode } from 'three/webgpu';
-			import { positionLocal, vec3, vec4, float } from 'three/tsl';
+			import { positionLocal, vec3, vec4, float, step } from 'three/tsl';
 			import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 			import { VolumetricPointLight } from 'three/addons/lights/VolumetricPointLight.js';
 
 			const camera = new THREE.PerspectiveCamera( 45, innerWidth / innerHeight, 0.5, 100 );
-			camera.position.set( 0, 8, 12 );
+			camera.position.set( 0, 14, 0.001 ); // top-down so the floor quadrants are unambiguous
 
 			const scene = new THREE.Scene();
 			scene.add( new THREE.AmbientLight( 0xffffff, 0.15 ) );
@@ -24,18 +24,27 @@
 			floor.receiveShadow = true;
 			scene.add( floor );
 
-			// caster: box with a high-contrast STRIPE castShadowNode
-			const mat = new THREE.MeshPhysicalNodeMaterial( { transmission: 1, ior: 1.5, roughness: 0.05, transparent: true } );
-			const stripes = positionLocal.y.mul( 4 ).floor().mod( 2 ).mix( float( 0.1 ), float( 1.0 ) );
-			mat.castShadowNode = vec4( vec3( stripes ), 0.95 );
+			// world-axis markers so I can read orientation on the floor:
+			// +X = red bar, +Z = blue bar
+			const xbar = new THREE.Mesh( new THREE.BoxGeometry( 6, 0.1, 0.4 ), new THREE.MeshBasicMaterial( { color: 0xff0000 } ) );
+			xbar.position.set( 3, 0.02, 0 ); scene.add( xbar );
+			const zbar = new THREE.Mesh( new THREE.BoxGeometry( 0.4, 0.1, 6 ), new THREE.MeshBasicMaterial( { color: 0x0000ff } ) );
+			zbar.position.set( 0, 0.02, 3 ); scene.add( zbar );
 
-			const box = new THREE.Mesh( new THREE.BoxGeometry( 3, 3, 3 ), mat );
-			box.position.set( 0, 3, 0 );
+			// caster: box whose castShadowNode encodes a 4-quadrant pattern by LOCAL x/z:
+			//   x<0,z<0 -> yellow | x>0,z<0 -> green | x<0,z>0 -> red | x>0,z>0 -> black
+			const mat = new THREE.MeshPhysicalNodeMaterial( { transmission: 1, ior: 1.5, roughness: 0.05, transparent: true } );
+			const r = step( positionLocal.x, 0 );  // 1 when x<0
+			const g = step( positionLocal.z, 0 );  // 1 when z<0
+			mat.castShadowNode = vec4( r, g, float( 0 ), 0.95 );
+
+			const box = new THREE.Mesh( new THREE.BoxGeometry( 4, 2, 4 ), mat );
+			box.position.set( 0, 4, 0 );
 			box.castShadow = true;
 			scene.add( box );
 
 			const light = new VolumetricPointLight( 0xffffff, 300 );
-			light.position.set( 0.001, 9, 0.001 );
+			light.position.set( 0.001, 10, 0.001 ); // directly overhead -> dominant -Y face
 			light.castShadow = true;
 			light.shadow.mapSize.set( 1024, 1024 );
 			light.shadow.camera.near = 0.5;
@@ -52,7 +61,7 @@
 			document.body.appendChild( renderer.domElement );
 
 			const controls = new OrbitControls( camera, renderer.domElement );
-			controls.target.set( 0, 1, 0 );
+			controls.target.set( 0, 0, 0 );
 			controls.update();
 
 			renderer.setAnimationLoop( () => renderer.render( scene, camera ) );
