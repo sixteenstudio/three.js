@@ -461,6 +461,7 @@
 		"webgpu_rtt",
 		"webgpu_sandbox",
 		"webgpu_shadertoy",
+		"webgpu_shadow_caustics",
 		"webgpu_shadow_contact",
 		"webgpu_shadowmap",
 		"webgpu_shadowmap_array",
