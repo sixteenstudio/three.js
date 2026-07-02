@@ -21,6 +21,7 @@
 
 			<small>
 				A procedurally generated Ligurian cliffside village, in the manner of the Cinque Terre.
+				Optional baked global illumination via an island-wide light probe grid.
 			</small>
 		</div>
 
@@ -38,16 +39,21 @@
 		<script type="module">
 
 			import * as THREE from 'three/webgpu';
+			import { pass } from 'three/tsl';
 
 			import { Inspector } from 'three/addons/inspector/Inspector.js';
 			import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 			import { SkyMesh } from 'three/addons/objects/SkyMesh.js';
+			import { bloom } from 'three/addons/tsl/display/BloomNode.js';
+			import { LightProbeGrid } from 'three/addons/lighting/LightProbeGrid.js';
+			import { LightProbeGridHelper } from 'three/addons/helpers/LightProbeGridHelper.js';
 			import { VillageGenerator } from 'three/addons/generators/VillageGenerator.js';
 			import { createHouseMaterial } from 'three/addons/generators/village/HouseGenerator.js';
 
-			let camera, scene, renderer, controls;
+			let camera, scene, renderer, controls, renderPipeline;
 			let villageGroup, materials, village;
 			let sky, sunLight, pmremGenerator, envScene;
+			let probes, probesHelper, rebakeTimer = null, baking = false;
 
 			// reused by updateSun(): the current sun direction and the key-light
 			// colours it blends between as the sun nears the horizon or climbs high
@@ -57,7 +63,9 @@
 
 			const parameters = {
 				seed: 1,
-				timeOfDay: 10.5 // hours: 6 sunrise, 12 noon, 18 sunset
+				timeOfDay: 10.5, // hours: 6 sunrise, 12 noon, 18 sunset
+				globalIllumination: false, // bakes a light probe grid on first enable
+				showProbes: false
 			};
 
 			init();
@@ -125,14 +133,107 @@
 				village = new VillageGenerator( { seed: parameters.seed } );
 				generateVillage();
 
+				// bloom: a soft glow on the brightest areas — sun glitter on the swell,
+				// lit windows at dusk — run on the linear HDR scene colour before tone
+				// mapping folds it back to display range
+
+				renderPipeline = new THREE.RenderPipeline( renderer );
+
+				const scenePassColor = pass( scene, camera ).getTextureNode( 'output' );
+				const bloomPass = bloom( scenePassColor, 0.03, 0.0, 0.0 );
+
+				renderPipeline.outputNode = scenePassColor.add( bloomPass );
+
 				// parameters
 
 				const gui = renderer.inspector.createParameters( 'Village' );
 				gui.add( parameters, 'seed', 0, 100, 1 ).onChange( generateVillage );
 				gui.add( parameters, 'timeOfDay', 6, 18, 0.1 ).name( 'time of day' ).onChange( updateSun );
+				gui.add( parameters, 'globalIllumination' ).name( 'global illumination' ).onChange( updateGI );
+				gui.add( parameters, 'showProbes' ).name( 'show probes' ).onChange( updateGI );
 				gui.add( renderer, 'toneMappingExposure', 0.01, 1 ).name( 'exposure' );
+				gui.add( bloomPass.strength, 'value', 0, 1 ).name( 'bloom' );
 
 				window.addEventListener( 'resize', onWindowResize );
+
+			}
+
+			// bakes ( or rebakes ) the light probe grid over the whole island: stacks
+			// of six probes rise through every column of the lattice, so wherever the
+			// terrain surface falls, dark buried probes shade the ground's own soil
+			// shadow ( the terrain renders double-sided so they can't see the sky )
+			// and the lit ones above carry the bounce. the sky fill steps back while
+			// the probes hold the ambient, so the bounce reads instead of
+			// double-counting.
+
+			async function bakeProbes() {
+
+				if ( baking ) return; // a bake several seconds long must not overlap itself
+
+				baking = true;
+
+				try {
+
+					if ( probes ) {
+
+						scene.remove( probes );
+						probes.dispose();
+
+					}
+
+					if ( probesHelper ) probesHelper.visible = false; // never bake the helper into the probes
+
+					probes = new LightProbeGrid( 460, 120, 310, 30, 6, 20 );
+					probes.position.set( - 10, 56, - 70 );
+					probes.falloff = 25;
+					await probes.bake( renderer, scene, { cubemapSize: 12, near: 0.5, far: 1200 } );
+					scene.add( probes );
+
+					if ( ! probesHelper ) {
+
+						probesHelper = new LightProbeGridHelper( probes );
+						scene.add( probesHelper );
+
+					} else {
+
+						probesHelper.probes = probes;
+						probesHelper.update();
+
+					}
+
+				} finally {
+
+					baking = false;
+
+				}
+
+			}
+
+			async function updateGI() {
+
+				if ( ( parameters.globalIllumination || parameters.showProbes ) && ! probes ) await bakeProbes();
+
+				if ( probes ) probes.visible = parameters.globalIllumination;
+				if ( probesHelper ) probesHelper.visible = parameters.showProbes;
+
+				scene.environmentIntensity = parameters.globalIllumination ? 0.2 : 0.35; // the probes take over most of the sky fill inside their volume
+
+			}
+
+			// the probes hold a moment of light: rebake once the sun or the seed
+			// settles, debounced so a slider drag bakes once, not every step
+
+			function scheduleRebake() {
+
+				if ( ! probes ) return;
+
+				if ( rebakeTimer !== null ) clearTimeout( rebakeTimer );
+				rebakeTimer = setTimeout( async () => {
+
+					await bakeProbes();
+					updateGI();
+
+				}, 300 );
 
 			}
 
@@ -170,6 +271,8 @@
 				sky.showSunDisc.value = true;
 				scene.add( sky );
 
+				scheduleRebake();
+
 			}
 
 			function generateVillage() {
@@ -179,6 +282,8 @@
 				village.parameters.seed = parameters.seed;
 				villageGroup = village.build( materials );
 				scene.add( villageGroup );
+
+				scheduleRebake();
 
 			}
 
@@ -195,7 +300,7 @@
 
 				controls.update();
 
-				renderer.render( scene, camera );
+				renderPipeline.render();
 
 			}
 
