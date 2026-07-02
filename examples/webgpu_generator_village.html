@@ -39,7 +39,7 @@
 		<script type="module">
 
 			import * as THREE from 'three/webgpu';
-			import { diffuseColor, materialRoughness, mrt, normalView, output, packNormalToRGB, pass, positionViewDirection, sample, unpackRGBToNormal, vec4, velocity } from 'three/tsl';
+			import { diffuseColor, materialRoughness, mix, mrt, normalView, normalViewGeometry, output, packNormalToRGB, pass, positionViewDirection, sample, unpackRGBToNormal, vec4, velocity } from 'three/tsl';
 
 			import { Inspector } from 'three/addons/inspector/Inspector.js';
 			import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
@@ -193,9 +193,25 @@
 					// water, and true fresnel would starve the reflection at that height
 					const facing = normalView.dot( positionViewDirection ).clamp();
 					const fresnel = facing.oneMinus().pow( 3 ).mul( 0.65 ).add( 0.35 );
-					const gloss = materialRoughness.smoothstep( 0.15, 0.5 ).oneMinus(); // the foam stays matte
 
-					seaMaterial.mrtNode = mrt( { diffuseColor: vec4( diffuseColor.rgb, fresnel.mul( gloss ) ) } );
+					// the sea's roughness lives in its roughnessNode — materialRoughness
+					// reads the scalar property, which the node leaves at 1
+					const seaRoughness = seaMaterial.roughnessNode;
+					const gloss = seaRoughness.smoothstep( 0.15, 0.5 ).oneMinus(); // the foam stays matte
+
+					// trace against a mostly flattened normal: the full swell scatters
+					// neighbouring rays so far apart that hits arrive one pixel at a
+					// time — this keeps the mirror image coherent, and what remains of
+					// the wobble still makes the reflection swim
+					const tracingNormal = mix( normalViewGeometry, normalView, 0.35 );
+
+					seaMaterial.mrtNode = mrt( {
+						diffuseColor: vec4( diffuseColor.rgb, fresnel.mul( gloss ) ),
+						// the roughness is compressed for the blur-mip pick: the wobble in
+						// the traced normal already softens the image, and the mid mips
+						// read as blocky smears on water this bright
+						normal: vec4( packNormalToRGB( tracingNormal ).rgb, seaRoughness.mul( 0.3 ) )
+					} );
 
 				} else {
 
