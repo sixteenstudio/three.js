@@ -21,7 +21,7 @@
 
 			<small>
 				A procedurally generated Ligurian cliffside village, in the manner of the Cinque Terre.
-				Optional screen-space GI, denoised reflections and temporal AA.
+				Optional screen-space GI, water reflections and temporal AA.
 			</small>
 		</div>
 
@@ -39,7 +39,7 @@
 		<script type="module">
 
 			import * as THREE from 'three/webgpu';
-			import { diffuseColor, materialMetalness, materialRoughness, mrt, normalView, output, packNormalToRGB, pass, sample, unpackRGBToNormal, vec2, vec4, velocity } from 'three/tsl';
+			import { diffuseColor, materialRoughness, mrt, normalView, output, packNormalToRGB, pass, positionViewDirection, sample, unpackRGBToNormal, vec4, velocity } from 'three/tsl';
 
 			import { Inspector } from 'three/addons/inspector/Inspector.js';
 			import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
@@ -47,13 +47,12 @@
 			import { bloom } from 'three/addons/tsl/display/BloomNode.js';
 			import { ssgi } from 'three/addons/tsl/display/SSGINode.js';
 			import { ssr } from 'three/addons/tsl/display/SSRNode.js';
-			import { temporalReproject } from 'three/addons/tsl/display/TemporalReprojectNode.js';
-			import { recurrentDenoise } from 'three/addons/tsl/display/RecurrentDenoiseNode.js';
 			import { traa } from 'three/addons/tsl/display/TRAANode.js';
 			import { VillageGenerator } from 'three/addons/generators/VillageGenerator.js';
 			import { createHouseMaterial } from 'three/addons/generators/village/HouseGenerator.js';
 
 			let camera, scene, renderer, controls, renderPipeline, bloomPass;
+			const effectPasses = []; // the live chain, disposed on rebuild
 			let villageGroup, materials, village;
 			let sky, sunLight, pmremGenerator, envScene;
 
@@ -67,7 +66,7 @@
 				seed: 1,
 				timeOfDay: 10.5, // hours: 6 sunrise, 12 noon, 18 sunset
 				globalIllumination: false, // screen-space GI with its own ambient occlusion
-				reflections: false, // screen-space reflections, spatiotemporally denoised
+				reflections: false, // screen-space reflections, traced for the sea alone
 				temporalAA: false,
 				bloom: 0.03
 			};
@@ -146,7 +145,7 @@
 				gui.add( parameters, 'seed', 0, 100, 1 ).onChange( generateVillage );
 				gui.add( parameters, 'timeOfDay', 6, 18, 0.1 ).name( 'time of day' ).onChange( updateSun );
 				gui.add( parameters, 'globalIllumination' ).name( 'global illumination' ).onChange( buildPipeline );
-				gui.add( parameters, 'reflections' ).name( 'reflections' ).onChange( buildPipeline );
+				gui.add( parameters, 'reflections' ).name( 'water reflections' ).onChange( buildPipeline );
 				gui.add( parameters, 'temporalAA' ).name( 'temporal AA' ).onChange( buildPipeline );
 				gui.add( renderer, 'toneMappingExposure', 0.01, 1 ).name( 'exposure' );
 				gui.add( parameters, 'bloom', 0, 1 ).onChange( ( value ) => bloomPass.strength.value = value );
@@ -162,22 +161,49 @@
 
 			function buildPipeline() {
 
+				for ( const effect of effectPasses ) effect.dispose();
+				effectPasses.length = 0;
+
 				const screenSpace = parameters.globalIllumination || parameters.reflections || parameters.temporalAA;
 
 				// the temporal history copies need a single-sample pass, so MSAA steps
 				// aside while any screen-space effect runs ( temporal AA covers for it )
 				const scenePass = pass( scene, camera, screenSpace ? { samples: 0 } : {} );
+				effectPasses.push( scenePass );
 
 				if ( screenSpace ) {
 
 					scenePass.setMRT( mrt( {
 						output: output,
-						diffuseColor: vec4( diffuseColor.rgb, materialMetalness ), // albedo, with metalness in alpha
+						diffuseColor: vec4( diffuseColor.rgb, 0 ), // albedo; the alpha is a reflection weight, written by the sea below
 						normal: vec4( packNormalToRGB( normalView ).rgb, materialRoughness ), // packed normal, with roughness in alpha
 						velocity: velocity
 					} ) );
 
 				}
+
+				// only the sea reflects: it tags its pixels through the shared diffuse
+				// target with a fresnel weight, so the island leans into the water more
+				// strongly the flatter the view — the way water does
+				const seaMaterial = village.seaMaterial;
+
+				if ( parameters.reflections ) {
+
+					// friendlier than the physical curve — the camera flies well above the
+					// water, and true fresnel would starve the reflection at that height
+					const facing = normalView.dot( positionViewDirection ).clamp();
+					const fresnel = facing.oneMinus().pow( 3 ).mul( 0.65 ).add( 0.35 );
+					const gloss = materialRoughness.smoothstep( 0.15, 0.5 ).oneMinus(); // the foam stays matte
+
+					seaMaterial.mrtNode = mrt( { diffuseColor: vec4( diffuseColor.rgb, fresnel.mul( gloss ) ) } );
+
+				} else {
+
+					seaMaterial.mrtNode = null;
+
+				}
+
+				seaMaterial.needsUpdate = true;
 
 				const scenePassColor = scenePass.getTextureNode( 'output' );
 				let color = scenePassColor;
@@ -205,6 +231,7 @@
 						const giPass = ssgi( color, scenePassDepth, sceneNormal, camera );
 						giPass.sliceCount.value = 2;
 						giPass.stepCount.value = 8;
+						effectPasses.push( giPass );
 
 						color = vec4( color.rgb.mul( giPass.getAONode() ).add( scenePassDiffuse.rgb.mul( giPass.getGINode().rgb ) ), color.a );
 
@@ -212,58 +239,45 @@
 
 					if ( parameters.reflections ) {
 
-						// screen-space reflections, temporally reprojected and denoised, so
-						// the harbour houses lean into the cove instead of only the sky
-
-						const metalRough = sample( ( uv ) => vec2( scenePassDiffuse.sample( uv ).a, scenePassNormal.sample( uv ).a ) );
-
-						// the ray-march samples the raw pass texture ( the GI composite above
-						// is an expression, which a marcher can't read at arbitrary points ).
-						// mirror tracing rather than stochastic: the stochastic path leans on
-						// an HDR environment for its misses, and this sky is procedural.
+						// a single mirror trace, weighted by the fresnel term the sea wrote
+						// into the diffuse alpha; every other surface early-outs at weight
+						// zero. no denoiser — the swell in the normals is the only scatter,
+						// and it reads as living water. the ray-march samples the raw pass
+						// texture ( the GI composite above is an expression, which a
+						// marcher can't read at arbitrary points ).
 						const ssrPass = ssr( scenePassColor, scenePassDepth, sceneNormal, {
 							camera,
-							reflectNonMetals: true, // the sea and the glazing are the reflectors here, and both are dielectric
-							diffuseNode: scenePassDiffuse,
 							metalnessNode: scenePassDiffuse.a,
 							roughnessNode: scenePassNormal.a
 						} );
-						ssrPass.maxDistance.value = 90; // in metres — far enough to carry a facade across the cove
-						ssrPass.thickness.value = 1;
-						ssrPass.quality.value = 0.3;
-						ssrPass.intensity.value = 1.5;
+						ssrPass.maxDistance.value = 250; // in metres — the headland stands tall, and its reflection reaches far
+						ssrPass.thickness.value = 2;
+						ssrPass.quality.value = 0.5;
+						effectPasses.push( ssrPass );
 
-						const reprojected = temporalReproject( ssrPass, scenePassDepth, scenePassNormal, scenePassVelocity, camera, { mode: 'specular', accumulate: false } );
+						// a fresnel lerp rather than a plain add: the water dims by the
+						// weight where the ray hit, so dark cliffs reflect as convincingly
+						// as sunlit walls
+						const reflectivity = scenePassDiffuse.a.mul( ssrPass.a.greaterThan( 0 ).toFloat() );
 
-						const denoised = recurrentDenoise( reprojected, camera, {
-							depth: scenePassDepth,
-							normal: scenePassNormal,
-							raw: ssrPass,
-							metalRoughness: metalRough,
-							mode: 'specular',
-							accumulate: true
-						} );
-						denoised.alphaSource = 'raylength'; // the SSR alpha channel carries ray length
-
-						// the denoised history feeds back for stable multi-bounce reflections
-						ssrPass.setHistory( denoised, scenePassVelocity );
-						reprojected.setHistoryTexture( denoised );
-
-						color = vec4( color.rgb.add( denoised.rgb ), color.a );
+						color = vec4( color.rgb.mul( reflectivity.oneMinus() ).add( ssrPass.rgb ), color.a );
 
 					}
 
 					if ( parameters.temporalAA ) {
 
 						color = traa( color, scenePassDepth, scenePassVelocity, camera );
+						effectPasses.push( color );
 
 					}
 
 				}
 
 				bloomPass = bloom( color, parameters.bloom, 0.0, 0.0 );
+				effectPasses.push( bloomPass );
 
 				renderPipeline.outputNode = color.add( bloomPass );
+				renderPipeline.needsUpdate = true;
 
 			}
 
