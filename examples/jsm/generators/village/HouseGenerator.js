@@ -17,7 +17,7 @@ import {
 } from 'three';
 
 import { MeshStandardNodeMaterial } from 'three/webgpu';
-import { attribute, color, float, floor, Fn, fract, fwidth, hash as ihash, mix, positionLocal, positionView, positionWorld, normalView, select, smoothstep, step, uint, uv, varying, vec3 } from 'three/tsl';
+import { attribute, color, float, floor, Fn, fract, fwidth, hash as ihash, mix, normalWorldGeometry, positionLocal, positionView, positionWorld, normalView, select, smoothstep, step, uint, uv, varying, vec3 } from 'three/tsl';
 
 const _scale = /*@__PURE__*/ new Vector3();
 const _position = /*@__PURE__*/ new Vector3();
@@ -26,9 +26,11 @@ const _normalMatrix = /*@__PURE__*/ new Matrix3();
 const _identity = /*@__PURE__*/ new Matrix4();
 
 // material-zone codes baked per vertex into the merged geometry, so one material can
-// branch on partId and shade every zone
-const PartId = { WALL: 0, TRIM: 1, SHUTTER: 2, ROOF: 3, GLASS: 4, DOOR: 5, STONE: 6, RAIL: 7, TERRACE: 8 };
-const { WALL, TRIM, SHUTTER, ROOF, GLASS, DOOR, STONE, RAIL, TERRACE } = PartId;
+// branch on partId and shade every zone. BRICK is the solid fired clay of ridge
+// caps, verge tiles and chimney stacks — tile-toned, but without the slope's
+// barrel pattern, which would stretch with each box's size.
+const PartId = { WALL: 0, TRIM: 1, SHUTTER: 2, ROOF: 3, GLASS: 4, DOOR: 5, STONE: 6, RAIL: 7, TERRACE: 8, BRICK: 9 };
+const { WALL, TRIM, SHUTTER, ROOF, GLASS, DOOR, STONE, RAIL, TERRACE, BRICK } = PartId;
 
 // the flat painted band around every opening; the sills, cornices and fascias key
 // off it so all the facade trim reads as one consistent painted system
@@ -272,14 +274,14 @@ class HouseGenerator {
 		// one accumulator per kind of part: extruded walls in house space, plus
 		// instance matrices for every repeated box / plane module
 
-		const extras = []; // extruded walls and gables, already in house-local space
+		const extras = []; // extruded walls and roof slopes ( { geometry, partId } ), already in house-local space
 		const trim = []; // surrounds, sills, cornices, fascias, chimney caps ( unit boxes )
 		const shutters = [];
 		const rails = [];
 		const stone = []; // podium and door steps
-		const roofBoxes = []; // ridge capping and verge tiles
+		const brick = []; // ridge capping, verge tiles and chimney stacks — solid fired clay
 		const terraceBoxes = []; // flat cotto terrace floors
-		const wallBoxes = []; // chimney stacks and parapets
+		const wallBoxes = []; // parapets
 		const glass = []; // window panes ( unit planes )
 		const doors = [];
 
@@ -306,10 +308,10 @@ class HouseGenerator {
 		// the roof: tiled slopes with overhanging eaves over the gabled span, a
 		// walkable terrace behind a parapet over the rest
 
-		if ( gableSpan ) buildRoof( extras, trim, roofBoxes, w, d, eaves, ridge, p, gableSpan );
+		if ( gableSpan ) buildRoof( extras, trim, brick, w, d, eaves, ridge, p, gableSpan );
 		if ( terraceSpan ) buildTerrace( wallBoxes, trim, rails, terraceBoxes, w, d, eaves, terraceSpan, p.roofStyle === 'combo' );
 
-		// chimneys: short plastered stacks with a cap slab, straddling the ridge
+		// chimneys: short brick stacks with a cap slab, straddling the ridge
 
 		const chimneys = gableSpan && gableSpan[ 1 ] - gableSpan[ 0 ] > 2.4 ? Math.floor( random() * 2.4 ) : 0; // 0..2, most houses have at least one
 
@@ -320,7 +322,7 @@ class HouseGenerator {
 			const top = ridge + 0.4 + random() * 0.5;
 			const size = 0.4 + random() * 0.15;
 
-			wallBoxes.push( boxMatrix( cx, ( top + ridge - 0.8 ) / 2, cz, size, top - ridge + 0.8, size ) );
+			brick.push( boxMatrix( cx, ( top + ridge - 0.8 ) / 2, cz, size, top - ridge + 0.8, size ) );
 			trim.push( boxMatrix( cx, top + 0.04, cz, size + 0.14, 0.08, size + 0.14 ) );
 
 		}
@@ -342,12 +344,12 @@ class HouseGenerator {
 
 		const groups = [];
 
-		for ( const geometry of extras ) groups.push( { geometry: nonIndexed( geometry ), matrices: [ _identity ], partId: WALL, rigid: true } );
+		for ( const extra of extras ) groups.push( { geometry: nonIndexed( extra.geometry ), matrices: [ _identity ], partId: extra.partId, rigid: true } );
 
 		if ( trim.length > 0 ) groups.push( { geometry: _unitBox, matrices: trim, partId: TRIM } );
 		if ( shutters.length > 0 ) groups.push( { geometry: _unitBox, matrices: shutters, partId: SHUTTER } );
 		if ( wallBoxes.length > 0 ) groups.push( { geometry: _unitBox, matrices: wallBoxes, partId: WALL } );
-		if ( roofBoxes.length > 0 ) groups.push( { geometry: _unitBox, matrices: roofBoxes, partId: ROOF } );
+		if ( brick.length > 0 ) groups.push( { geometry: _unitBox, matrices: brick, partId: BRICK } );
 		if ( terraceBoxes.length > 0 ) groups.push( { geometry: _unitBox, matrices: terraceBoxes, partId: TERRACE } );
 		if ( rails.length > 0 ) groups.push( { geometry: _unitBox, matrices: rails, partId: RAIL } );
 		if ( stone.length > 0 ) groups.push( { geometry: _unitBox, matrices: stone, partId: STONE } );
@@ -499,7 +501,7 @@ function buildFacade( extras, modules, w, d, t, eaves, p, random, rotationY, wit
 	const wall = new ExtrudeGeometry( shape, { depth: t, bevelEnabled: false } );
 	wall.translate( 0, 0, d / 2 - t );
 	if ( rotationY !== 0 ) wall.rotateY( rotationY );
-	extras.push( wall );
+	extras.push( { geometry: wall, partId: WALL } );
 
 	// dress every opening; module positions rotate with the facade
 
@@ -560,7 +562,7 @@ function buildGableWall( extras, modules, w, d, t, eaves, ridge, p, random, side
 	const wall = new ExtrudeGeometry( shape, { depth: t, bevelEnabled: false } );
 	wall.translate( 0, 0, w / 2 - t - 0.02 );
 	wall.rotateY( rotationY );
-	extras.push( wall );
+	extras.push( { geometry: wall, partId: WALL } );
 
 	for ( const o of openings ) {
 
@@ -687,7 +689,7 @@ function planeMatrix( x, y, z, sizeX, sizeY ) {
 // eaves, verge tiles, a ridge cap, fascia boards and a cornice line on each
 // facade — and, where the span stops short of the house end, a gable-end wall
 // closing the roof against the terrace
-function buildRoof( extras, trim, roofBoxes, w, d, eaves, ridge, p, span ) {
+function buildRoof( extras, trim, brick, w, d, eaves, ridge, p, span ) {
 
 	const [ x0, x1 ] = span;
 
@@ -717,7 +719,7 @@ function buildRoof( extras, trim, roofBoxes, w, d, eaves, ridge, p, span ) {
 		slope.translate( 0, ( ridgeY + eaveY ) / 2, run / 2 );
 		if ( side < 0 ) slope.rotateY( Math.PI );
 		slope.translate( cx, 0, 0 );
-		extras.push( slope );
+		extras.push( { geometry: slope, partId: ROOF } );
 
 		// verge tiles along the gable edges, so the thin slope plane reads as a
 		// roof with body from street level rather than vanishing edge-on
@@ -725,7 +727,7 @@ function buildRoof( extras, trim, roofBoxes, w, d, eaves, ridge, p, span ) {
 
 		for ( const sx of [ - 1, 1 ] ) {
 
-			roofBoxes.push( new Matrix4()
+			brick.push( new Matrix4()
 				.makeRotationX( lean )
 				.scale( _scale.set( 0.14, 0.12, slopeLength - 0.02 ) )
 				.setPosition( _position.set( cx + sx * ( width / 2 - 0.06 ), ( ridgeY + eaveY ) / 2 + 0.02, side * run / 2 ) ) );
@@ -740,7 +742,7 @@ function buildRoof( extras, trim, roofBoxes, w, d, eaves, ridge, p, span ) {
 
 	}
 
-	roofBoxes.push( boxMatrix( cx, ridgeY + 0.03, 0, width, 0.1, 0.34 ) );
+	brick.push( boxMatrix( cx, ridgeY + 0.03, 0, width, 0.1, 0.34 ) );
 
 	// the interior gable end: a triangle standing on the wall head, closing the
 	// slopes where they stop over the terrace; tucked just inside the gabled span
@@ -758,7 +760,7 @@ function buildRoof( extras, trim, roofBoxes, w, d, eaves, ridge, p, span ) {
 		const wall = new ExtrudeGeometry( shape, { depth: 0.22, bevelEnabled: false } );
 		wall.translate( 0, 0, x + inset );
 		wall.rotateY( Math.PI / 2 );
-		extras.push( wall );
+		extras.push( { geometry: wall, partId: WALL } );
 
 	}
 
@@ -988,6 +990,15 @@ function createHouseMaterial() {
 		.mul( barrelJoint.mul( 0.26 ).oneMinus() )
 		.mul( float( 1 ).add( tone ) );
 
+	// ridge caps, verge tiles and chimney stacks: solid fired clay in the roof's
+	// family — coursed like stacked brick on their vertical faces, plain on top,
+	// so nothing stretches with the size of the piece it dresses
+	const brickCourse = gridLine( positionWorld.y, 0.075, 0.007 ).mul( smoothstep( 0.55, 0.25, normalWorldGeometry.y.abs() ) );
+	const brickColor = roofBase
+		.mul( valueNoise( positionWorld.mul( 3.2 ) ).mul( 0.12 ).add( 1 ) )
+		.mul( brickCourse.mul( 0.24 ).oneMinus() )
+		.mul( float( 1 ).add( tone ) );
+
 	// terrace floors: square cotto tiles laid in house-local metres — always the
 	// fired orange of the kiln, whatever colour the walls below are washed
 	const cottoJoint = gridLine( positionLocal.x, 0.34, 0.014 ).max( gridLine( positionLocal.z, 0.34, 0.014 ) );
@@ -1011,6 +1022,7 @@ function createHouseMaterial() {
 	const block = valueNoise( vec3( positionWorld.x.mul( 1.3 ), positionWorld.y.mul( 2.6 ), positionWorld.z.mul( 1.3 ) ) ).mul( 0.5 ).add( 0.5 );
 	let stoneColor = mix( color( 0x776f5f ), color( 0x958b76 ), block );
 	stoneColor = stoneColor.mul( valueNoise( positionWorld.mul( 0.35 ) ).mul( 0.14 ).add( 0.93 ) );
+	stoneColor = stoneColor.mul( valueNoise( positionWorld.mul( 5.5 ) ).mul( 0.1 ).mul( smoothstep( 0.06, 0.015, texel ) ).add( 1 ) ); // close-range grit, faded before it can sparkle
 	stoneColor = mix( stoneColor, color( 0x4c5348 ), smoothstep( 1.6, 0.5, positionWorld.y ).mul( 0.5 ) ); // algae and tide-wash above the sea
 	stoneColor = mix( stoneColor, color( 0x3d4640 ), smoothstep( 0.7, 0.1, positionWorld.y ).mul( 0.5 ) );
 
@@ -1028,27 +1040,30 @@ function createHouseMaterial() {
 	const isStone = partId.equal( STONE );
 	const isRail = partId.equal( RAIL );
 	const isTerrace = partId.equal( TERRACE );
+	const isBrick = partId.equal( BRICK );
 
 	const material = new MeshStandardNodeMaterial();
 
 	material.colorNode = select( isTrim, trimColor,
 		select( isShutter, shutterShade,
 			select( isRoof, roofColor,
-				select( isTerrace, cottoColor,
-					select( isGlass, glassColor,
-						select( isDoor, doorColor,
-							select( isStone, stoneColor,
-								select( isRail, railColor, plaster ) ) ) ) ) ) ) );
+				select( isBrick, brickColor,
+					select( isTerrace, cottoColor,
+						select( isGlass, glassColor,
+							select( isDoor, doorColor,
+								select( isStone, stoneColor,
+									select( isRail, railColor, plaster ) ) ) ) ) ) ) ) );
 
 	material.roughnessNode = select( isGlass, float( 0.14 ), select( isRail, float( 0.5 ), select( isTerrace, float( 0.85 ), float( 0.95 ) ) ) );
 	material.metalnessNode = select( isRail, float( 0.55 ), float( 0 ) );
 
 	// relief: barrel-tile ridges on the roofs, recessed joints on the terrace
-	// cotto, a soft plaster / stone grain elsewhere; glass and trim stay smooth
+	// cotto and brick coursing, a soft plaster / stone grain elsewhere; glass
+	// and trim stay smooth
 	const grain = valueNoise( positionWorld.mul( 2.2 ) ).mul( select( isStone, float( 0.012 ), float( 0.004 ) ) );
 	const roofRelief = barrel.mul( 0.014 ).mul( barrelFade ).sub( courseJoint.mul( 0.018 ) );
 	const cottoRelief = cottoJoint.mul( - 0.006 );
-	material.normalNode = bumpNormal( select( isRoof, roofRelief, select( isTerrace, cottoRelief, select( isGlass.or( isTrim ), float( 0 ), grain ) ) ) );
+	material.normalNode = bumpNormal( select( isRoof, roofRelief, select( isTerrace, cottoRelief, select( isBrick, brickCourse.mul( - 0.008 ), select( isGlass.or( isTrim ), float( 0 ), grain ) ) ) ) );
 
 	return material;
 

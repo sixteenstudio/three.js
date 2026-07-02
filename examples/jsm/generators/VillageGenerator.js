@@ -38,7 +38,8 @@ const _unitBox = /*@__PURE__*/ new BoxGeometry( 1, 1, 1 ).toNonIndexed();
  * to a seeded coast curve drives the cliff profile, a ravine drains to the
  * cove, and every house row stamps a flat terrace into the hill before the
  * grid is baked, so the houses' stone podiums read as the retaining walls of
- * their terraces.
+ * their terraces. Paved lanes run the front of every row and ramps join the
+ * tiers and the quay, so the whole village connects into one walkable network.
  *
  * ```js
  * const village = new VillageGenerator( { seed: 1 } );
@@ -492,6 +493,8 @@ function layoutRow( layout, random, path, options ) {
 
 	let s = margin;
 	let previous = null;
+	let sFirst = null;
+	let sLast = null;
 
 	const endRun = () => {
 
@@ -567,11 +570,54 @@ function layoutRow( layout, random, path, options ) {
 		} );
 
 		previous = house;
+		if ( sFirst === null ) sFirst = s;
+		sLast = s + width;
 		s += width;
 
 	}
 
 	endRun();
+
+	if ( sFirst === null ) return null;
+
+	// the lane: a paved walk running the whole row front at the smooth grade
+	// the house bases were quantized from, so every doorstep is reachable and
+	// the terrace steps between neighbours ramp instead of jumping
+
+	const lanePoint = ( ls ) => {
+
+		const at = path.sample( ls );
+		return { x: at.x + at.tz * facing * 2.9, z: at.z - at.tx * facing * 2.9, h: elevation( ls ) + 0.05 };
+
+	};
+
+	for ( let ls = Math.max( 0, sFirst - 2 ); ls <= Math.min( path.length, sLast + 2 ); ls += 2.5 ) {
+
+		const point = lanePoint( ls );
+		layout.stamps.push( { cx: point.x, cz: point.z, r: 2.7, feather: 4.5, h: point.h } );
+
+	}
+
+	// the lane's two ends, for the ramps that join rows into a walkable network
+	return { first: lanePoint( sFirst + 1 ), last: lanePoint( sLast - 1 ) };
+
+}
+
+// a paved ramp between two lane anchors: disc stamps marching the line with
+// linearly blended height, carving a walkable shelf into the hillside
+function layoutRamp( layout, a, b ) {
+
+	if ( ! a || ! b ) return;
+
+	const length = Math.hypot( b.x - a.x, b.z - a.z );
+	const count = Math.max( 2, Math.ceil( length / 2.2 ) );
+
+	for ( let i = 0; i <= count; i ++ ) {
+
+		const t = i / count;
+		layout.stamps.push( { cx: a.x + ( b.x - a.x ) * t, cz: a.z + ( b.z - a.z ) * t, r: 2.5, feather: 4.5, h: a.h + ( b.h - a.h ) * t } );
+
+	}
 
 }
 
@@ -611,12 +657,13 @@ function buildLayout( p, random, coast ) {
 	};
 
 	const westRows = 4 + Math.floor( random() * 2 );
+	const westEnds = []; // each row's cove-side lane end, for the tier ramps
 
 	for ( let k = 0; k < westRows; k ++ ) {
 
 		const path = offsetCoastPath( coast, - 122 + k * 12 + random() * 6, coveX - 24 - k * 7, 7.5 + k * 11 );
 
-		layoutRow( layout, random, path, {
+		const run = layoutRow( layout, random, path, {
 			elevation: grade( path ),
 			facing: - 1,
 			depth: 8.5 + random(),
@@ -624,23 +671,28 @@ function buildLayout( p, random, coast ) {
 			floorsMax: 4
 		} );
 
+		if ( run ) westEnds.push( run.last );
+
 	}
 
 	// the far side of the cove: a smaller, lower cluster
 
 	const eastRows = 2 + Math.floor( random() * 2 );
+	const eastEnds = [];
 
 	for ( let k = 0; k < eastRows; k ++ ) {
 
 		const path = offsetCoastPath( coast, coveX + 22 + k * 5, coveX + 64 - k * 4, 6.5 + k * 10.5 );
 
-		layoutRow( layout, random, path, {
+		const run = layoutRow( layout, random, path, {
 			elevation: grade( path ),
 			facing: - 1,
 			depth: 8 + random(),
 			floorsMin: 2,
 			floorsMax: 3
 		} );
+
+		if ( run ) eastEnds.push( run.first );
 
 	}
 
@@ -663,6 +715,16 @@ function buildLayout( p, random, coast ) {
 	} );
 
 	layout.harbour = { x: coveX, z: harbourZ };
+
+	// join everything into one walkable network: ramps climb between the tiers
+	// of each cluster, and both clusters step down to the quay, so dock, west
+	// hill and east hill all connect without a scramble over the scrub
+
+	for ( let k = 1; k < westEnds.length; k ++ ) layoutRamp( layout, westEnds[ k - 1 ], westEnds[ k ] );
+	for ( let k = 1; k < eastEnds.length; k ++ ) layoutRamp( layout, eastEnds[ k - 1 ], eastEnds[ k ] );
+
+	layoutRamp( layout, { x: coveX - 19, z: harbourZ + 6, h: 2.2 }, westEnds[ 0 ] );
+	layoutRamp( layout, { x: coveX + 19, z: harbourZ + 6, h: 2.2 }, eastEnds[ 0 ] );
 
 	// the quay apron in front of the harbour row: its stamp holds the ground
 	// under the paving still, its claim keeps later rows off it
@@ -741,6 +803,9 @@ function buildLayout( p, random, coast ) {
 		} );
 
 	}
+
+	// and the street's foot runs out onto the quay
+	layoutRamp( layout, { x: streetFrom.x, z: streetFrom.y, h: streetElevation( axis.length ) }, { x: coveX, z: harbourZ + 6, h: 2.2 } );
 
 	return layout;
 
@@ -1202,7 +1267,9 @@ function createTerrainMaterial() {
 
 		If( near.greaterThan( 0.01 ), () => {
 
-			g.assign( valueNoise( positionWorld.mul( 2.7 ) ).mul( near ) );
+			g.assign( valueNoise( positionWorld.mul( 3.1 ) )
+				.add( valueNoise( positionWorld.mul( 11 ) ).mul( 0.6 ) )
+				.mul( near ) );
 
 		} );
 
@@ -1211,13 +1278,16 @@ function createTerrainMaterial() {
 	} )();
 
 	// stratified cliff rock: warm grey-brown bedding planes at two frequencies,
-	// veined by the fine noise's ridge lines and chipped by the grit
+	// chipped by the grit. the seams are the ridges of a noise field stretched
+	// hard along the bedding, so they run as horizontal fractures rather than
+	// wandering blobs.
 	const bandA = height.mul( 0.55 ).add( grain.mul( 2.2 ) ).add( macro.mul( 3 ) ).sin();
 	const bandB = height.mul( 1.6 ).add( grain.mul( 3 ) ).add( fine ).sin();
 	const strata = bandA.mul( 0.6 ).add( bandB.mul( 0.4 ) ).mul( 0.5 ).add( 0.5 );
-	const veins = smoothstep( 0.78, 0.95, fine.abs().oneMinus() ).mul( 0.3 ); // dark seams where the noise ridges
+	const seamField = valueNoise( vec3( positionWorld.x.mul( 0.5 ), positionWorld.y.mul( 3.4 ), positionWorld.z.mul( 0.5 ) ) );
+	const veins = smoothstep( 0.82, 0.96, seamField.abs().oneMinus() ).mul( 0.28 );
 	let rock = mix( color( 0x4a4336 ), color( 0x8a7d67 ), strata );
-	rock = rock.mul( veins.oneMinus() ).mul( grit.mul( 0.2 ).add( 1 ) );
+	rock = rock.mul( veins.oneMinus() ).mul( grit.mul( 0.22 ).add( 1 ) );
 
 	// the vegetated hill: dry maquis drifting through summer-scorched grass,
 	// tufted at hand scale so the green never reads as a solid fill
@@ -1407,8 +1477,8 @@ function createScrubMaterial() {
 
 		If( clumpFade.greaterThan( 0.01 ), () => {
 
-			c.assign( valueNoise( positionWorld.mul( 1.4 ) )
-				.add( valueNoise( positionWorld.mul( 3.8 ) ).mul( 0.5 ) )
+			c.assign( valueNoise( positionWorld.mul( 4.5 ) )
+				.add( valueNoise( positionWorld.mul( 13 ) ).mul( 0.5 ) )
 				.mul( clumpFade ) );
 
 		} );
