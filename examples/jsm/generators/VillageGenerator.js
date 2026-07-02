@@ -3,7 +3,6 @@ import {
 	BufferAttribute,
 	BufferGeometry,
 	ConeGeometry,
-	DoubleSide,
 	Float32BufferAttribute,
 	Group,
 	IcosahedronGeometry,
@@ -1248,7 +1247,6 @@ function createTerrainMaterial() {
 
 	const material = new MeshStandardNodeMaterial();
 	material.metalness = 0;
-	material.side = DoubleSide; // a probe baked under the hill must see dark ground, not the sky through culled backfaces
 
 	const distance = positionWorld.distance( cameraPosition );
 	const near = smoothstep( 130, 20, distance ); // the finest grit only resolves close in

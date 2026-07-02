@@ -21,7 +21,7 @@
 
 			<small>
 				A procedurally generated Ligurian cliffside village, in the manner of the Cinque Terre.
-				Optional baked global illumination via an island-wide light probe grid.
+				Optional screen-space GI, denoised reflections and temporal AA.
 			</small>
 		</div>
 
@@ -39,21 +39,23 @@
 		<script type="module">
 
 			import * as THREE from 'three/webgpu';
-			import { pass } from 'three/tsl';
+			import { diffuseColor, materialMetalness, materialRoughness, mrt, normalView, output, packNormalToRGB, pass, sample, unpackRGBToNormal, vec2, vec4, velocity } from 'three/tsl';
 
 			import { Inspector } from 'three/addons/inspector/Inspector.js';
 			import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 			import { SkyMesh } from 'three/addons/objects/SkyMesh.js';
 			import { bloom } from 'three/addons/tsl/display/BloomNode.js';
-			import { LightProbeGrid } from 'three/addons/lighting/LightProbeGrid.js';
-			import { LightProbeGridHelper } from 'three/addons/helpers/LightProbeGridHelper.js';
+			import { ssgi } from 'three/addons/tsl/display/SSGINode.js';
+			import { ssr } from 'three/addons/tsl/display/SSRNode.js';
+			import { temporalReproject } from 'three/addons/tsl/display/TemporalReprojectNode.js';
+			import { recurrentDenoise } from 'three/addons/tsl/display/RecurrentDenoiseNode.js';
+			import { traa } from 'three/addons/tsl/display/TRAANode.js';
 			import { VillageGenerator } from 'three/addons/generators/VillageGenerator.js';
 			import { createHouseMaterial } from 'three/addons/generators/village/HouseGenerator.js';
 
-			let camera, scene, renderer, controls, renderPipeline;
+			let camera, scene, renderer, controls, renderPipeline, bloomPass;
 			let villageGroup, materials, village;
 			let sky, sunLight, pmremGenerator, envScene;
-			let probes, probesHelper, rebakeTimer = null, baking = false;
 
 			// reused by updateSun(): the current sun direction and the key-light
 			// colours it blends between as the sun nears the horizon or climbs high
@@ -64,8 +66,10 @@
 			const parameters = {
 				seed: 1,
 				timeOfDay: 10.5, // hours: 6 sunrise, 12 noon, 18 sunset
-				globalIllumination: false, // bakes a light probe grid on first enable
-				showProbes: false
+				globalIllumination: false, // screen-space GI with its own ambient occlusion
+				reflections: false, // screen-space reflections, spatiotemporally denoised
+				temporalAA: false,
+				bloom: 0.03
 			};
 
 			init();
@@ -133,107 +137,133 @@
 				village = new VillageGenerator( { seed: parameters.seed } );
 				generateVillage();
 
-				// bloom: a soft glow on the brightest areas — sun glitter on the swell,
-				// lit windows at dusk — run on the linear HDR scene colour before tone
-				// mapping folds it back to display range
-
 				renderPipeline = new THREE.RenderPipeline( renderer );
-
-				const scenePassColor = pass( scene, camera ).getTextureNode( 'output' );
-				const bloomPass = bloom( scenePassColor, 0.03, 0.0, 0.0 );
-
-				renderPipeline.outputNode = scenePassColor.add( bloomPass );
+				buildPipeline();
 
 				// parameters
 
 				const gui = renderer.inspector.createParameters( 'Village' );
 				gui.add( parameters, 'seed', 0, 100, 1 ).onChange( generateVillage );
 				gui.add( parameters, 'timeOfDay', 6, 18, 0.1 ).name( 'time of day' ).onChange( updateSun );
-				gui.add( parameters, 'globalIllumination' ).name( 'global illumination' ).onChange( updateGI );
-				gui.add( parameters, 'showProbes' ).name( 'show probes' ).onChange( updateGI );
+				gui.add( parameters, 'globalIllumination' ).name( 'global illumination' ).onChange( buildPipeline );
+				gui.add( parameters, 'reflections' ).name( 'reflections' ).onChange( buildPipeline );
+				gui.add( parameters, 'temporalAA' ).name( 'temporal AA' ).onChange( buildPipeline );
 				gui.add( renderer, 'toneMappingExposure', 0.01, 1 ).name( 'exposure' );
-				gui.add( bloomPass.strength, 'value', 0, 1 ).name( 'bloom' );
+				gui.add( parameters, 'bloom', 0, 1 ).onChange( ( value ) => bloomPass.strength.value = value );
 
 				window.addEventListener( 'resize', onWindowResize );
 
 			}
 
-			// bakes ( or rebakes ) the light probe grid over the whole island: stacks
-			// of six probes rise through every column of the lattice, so wherever the
-			// terrain surface falls, dark buried probes shade the ground's own soil
-			// shadow ( the terrain renders double-sided so they can't see the sky )
-			// and the lit ones above carry the bounce. the sky fill steps back while
-			// the probes hold the ambient, so the bounce reads instead of
-			// double-counting.
+			// composes the render pipeline for the current toggles. the scene pass only
+			// carries the extra targets the screen-space effects read ( normals,
+			// velocity, material data ), so with everything off the plain view pays for
+			// none of it; bloom always caps the chain, on the linear HDR colour.
 
-			async function bakeProbes() {
+			function buildPipeline() {
 
-				if ( baking ) return; // a bake several seconds long must not overlap itself
+				const screenSpace = parameters.globalIllumination || parameters.reflections || parameters.temporalAA;
 
-				baking = true;
+				// the temporal history copies need a single-sample pass, so MSAA steps
+				// aside while any screen-space effect runs ( temporal AA covers for it )
+				const scenePass = pass( scene, camera, screenSpace ? { samples: 0 } : {} );
 
-				try {
+				if ( screenSpace ) {
 
-					if ( probes ) {
-
-						scene.remove( probes );
-						probes.dispose();
-
-					}
-
-					if ( probesHelper ) probesHelper.visible = false; // never bake the helper into the probes
-
-					probes = new LightProbeGrid( 460, 120, 310, 30, 6, 20 );
-					probes.position.set( - 10, 56, - 70 );
-					probes.falloff = 25;
-					await probes.bake( renderer, scene, { cubemapSize: 12, near: 0.5, far: 1200 } );
-					scene.add( probes );
-
-					if ( ! probesHelper ) {
-
-						probesHelper = new LightProbeGridHelper( probes );
-						scene.add( probesHelper );
-
-					} else {
-
-						probesHelper.probes = probes;
-						probesHelper.update();
-
-					}
-
-				} finally {
-
-					baking = false;
+					scenePass.setMRT( mrt( {
+						output: output,
+						diffuseColor: vec4( diffuseColor.rgb, materialMetalness ), // albedo, with metalness in alpha
+						normal: vec4( packNormalToRGB( normalView ).rgb, materialRoughness ), // packed normal, with roughness in alpha
+						velocity: velocity
+					} ) );
 
 				}
 
-			}
+				const scenePassColor = scenePass.getTextureNode( 'output' );
+				let color = scenePassColor;
 
-			async function updateGI() {
+				if ( screenSpace ) {
 
-				if ( ( parameters.globalIllumination || parameters.showProbes ) && ! probes ) await bakeProbes();
+					const scenePassDepth = scenePass.getTextureNode( 'depth' );
+					const scenePassNormal = scenePass.getTextureNode( 'normal' );
+					const scenePassVelocity = scenePass.getTextureNode( 'velocity' );
+					const scenePassDiffuse = scenePass.getTextureNode( 'diffuseColor' );
 
-				if ( probes ) probes.visible = parameters.globalIllumination;
-				if ( probesHelper ) probesHelper.visible = parameters.showProbes;
+					// the colour-like targets don't need float precision ( bandwidth )
 
-				scene.environmentIntensity = parameters.globalIllumination ? 0.2 : 0.35; // the probes take over most of the sky fill inside their volume
+					scenePass.getTexture( 'diffuseColor' ).type = THREE.UnsignedByteType;
+					scenePass.getTexture( 'normal' ).type = THREE.UnsignedByteType;
 
-			}
+					const sceneNormal = sample( ( uv ) => unpackRGBToNormal( scenePassNormal.sample( uv ).rgb ) );
 
-			// the probes hold a moment of light: rebake once the sun or the seed
-			// settles, debounced so a slider drag bakes once, not every step
+					if ( parameters.globalIllumination ) {
 
-			function scheduleRebake() {
+						// screen-space GI: bounce light gathered from the frame itself —
+						// the sunlit pastel walls carry into the alleys — with its own
+						// horizon-based ambient occlusion
 
-				if ( ! probes ) return;
+						const giPass = ssgi( color, scenePassDepth, sceneNormal, camera );
+						giPass.sliceCount.value = 2;
+						giPass.stepCount.value = 8;
 
-				if ( rebakeTimer !== null ) clearTimeout( rebakeTimer );
-				rebakeTimer = setTimeout( async () => {
+						color = vec4( color.rgb.mul( giPass.getAONode() ).add( scenePassDiffuse.rgb.mul( giPass.getGINode().rgb ) ), color.a );
 
-					await bakeProbes();
-					updateGI();
+					}
 
-				}, 300 );
+					if ( parameters.reflections ) {
+
+						// screen-space reflections, temporally reprojected and denoised, so
+						// the harbour houses lean into the cove instead of only the sky
+
+						const metalRough = sample( ( uv ) => vec2( scenePassDiffuse.sample( uv ).a, scenePassNormal.sample( uv ).a ) );
+
+						// the ray-march samples the raw pass texture ( the GI composite above
+						// is an expression, which a marcher can't read at arbitrary points ).
+						// mirror tracing rather than stochastic: the stochastic path leans on
+						// an HDR environment for its misses, and this sky is procedural.
+						const ssrPass = ssr( scenePassColor, scenePassDepth, sceneNormal, {
+							camera,
+							reflectNonMetals: true, // the sea and the glazing are the reflectors here, and both are dielectric
+							diffuseNode: scenePassDiffuse,
+							metalnessNode: scenePassDiffuse.a,
+							roughnessNode: scenePassNormal.a
+						} );
+						ssrPass.maxDistance.value = 90; // in metres — far enough to carry a facade across the cove
+						ssrPass.thickness.value = 1;
+						ssrPass.quality.value = 0.3;
+						ssrPass.intensity.value = 1.5;
+
+						const reprojected = temporalReproject( ssrPass, scenePassDepth, scenePassNormal, scenePassVelocity, camera, { mode: 'specular', accumulate: false } );
+
+						const denoised = recurrentDenoise( reprojected, camera, {
+							depth: scenePassDepth,
+							normal: scenePassNormal,
+							raw: ssrPass,
+							metalRoughness: metalRough,
+							mode: 'specular',
+							accumulate: true
+						} );
+						denoised.alphaSource = 'raylength'; // the SSR alpha channel carries ray length
+
+						// the denoised history feeds back for stable multi-bounce reflections
+						ssrPass.setHistory( denoised, scenePassVelocity );
+						reprojected.setHistoryTexture( denoised );
+
+						color = vec4( color.rgb.add( denoised.rgb ), color.a );
+
+					}
+
+					if ( parameters.temporalAA ) {
+
+						color = traa( color, scenePassDepth, scenePassVelocity, camera );
+
+					}
+
+				}
+
+				bloomPass = bloom( color, parameters.bloom, 0.0, 0.0 );
+
+				renderPipeline.outputNode = color.add( bloomPass );
 
 			}
 
@@ -271,8 +301,6 @@
 				sky.showSunDisc.value = true;
 				scene.add( sky );
 
-				scheduleRebake();
-
 			}
 
 			function generateVillage() {
@@ -282,8 +310,6 @@
 				village.parameters.seed = parameters.seed;
 				villageGroup = village.build( materials );
 				scene.add( villageGroup );
-
-				scheduleRebake();
 
 			}
 
