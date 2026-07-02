@@ -13,11 +13,12 @@ import {
 	PlaneGeometry,
 	Shape,
 	Sphere,
+	Vector2,
 	Vector3
 } from 'three';
 
 import { MeshStandardNodeMaterial } from 'three/webgpu';
-import { attribute, color, float, floor, Fn, fract, fwidth, hash as ihash, mix, normalWorldGeometry, positionLocal, positionView, positionWorld, normalView, select, smoothstep, step, uint, uv, varying, vec3 } from 'three/tsl';
+import { attribute, cameraPosition, color, cross, dot, float, floor, Fn, fract, fwidth, hash as ihash, mix, modelWorldMatrixInverse, normalLocal, normalWorldGeometry, positionLocal, positionView, positionWorld, normalView, select, smoothstep, step, uint, uv, varying, vec2, vec3, vec4 } from 'three/tsl';
 
 const _scale = /*@__PURE__*/ new Vector3();
 const _position = /*@__PURE__*/ new Vector3();
@@ -53,6 +54,8 @@ const _unitBox = /*@__PURE__*/ nonIndexed( new BoxGeometry( 1, 1, 1 ) );
  * base geometry ( position + normal + uv ), an array of Matrix4 placements and a `partId`
  * written to a per-vertex attribute, together with the constant per-house `paint`
  * ( palette index ) and `houseId` ( 0..1 hash ) attributes the shared material reads.
+ * A glass group also carries `rooms` — the interior-mapping room ( centre + size ) each
+ * pane looks into, baked per vertex so the material can shade a furnished interior.
  * Transforming straight into preallocated typed arrays avoids mergeGeometries'
  * per-instance allocations; the result is one geometry, ready for a single draw call.
  */
@@ -67,6 +70,8 @@ function bakeGroups( groups, paint = 0, houseId = 0 ) {
 	const partId = new Float32Array( total );
 	const paints = new Float32Array( total ).fill( paint );
 	const houseIds = new Float32Array( total ).fill( houseId );
+	const roomCenter = new Float32Array( total * 3 );
+	const roomSize = new Float32Array( total * 2 );
 
 	let w = 0;
 
@@ -83,10 +88,12 @@ function bakeGroups( groups, paint = 0, houseId = 0 ) {
 		const U = geometry.attributes.uv.array;
 		const count = geometry.attributes.position.count;
 		const id = group.partId;
+		const rooms = group.rooms; // per-instance { center, size }, glass only
 		const rigid = group.rigid === true; // pure rotation ( + translation ): the normal matrix is the rotation itself
 
 		for ( let i = 0; i < group.matrices.length; i ++ ) {
 
+			const room = rooms ? rooms[ i ] : null;
 			const matrix = group.matrices[ i ];
 			const e = matrix.elements;
 			const e0 = e[ 0 ], e1 = e[ 1 ], e2 = e[ 2 ], e4 = e[ 4 ], e5 = e[ 5 ], e6 = e[ 6 ], e8 = e[ 8 ], e9 = e[ 9 ], e10 = e[ 10 ], e12 = e[ 12 ], e13 = e[ 13 ], e14 = e[ 14 ];
@@ -126,6 +133,13 @@ function bakeGroups( groups, paint = 0, houseId = 0 ) {
 				uv[ w * 2 ] = U[ v * 2 ]; uv[ w * 2 + 1 ] = U[ v * 2 + 1 ];
 				partId[ w ] = id;
 
+				if ( room !== null ) {
+
+					roomCenter[ w3 ] = room.center.x; roomCenter[ w3 + 1 ] = room.center.y; roomCenter[ w3 + 2 ] = room.center.z;
+					roomSize[ w * 2 ] = room.size.x; roomSize[ w * 2 + 1 ] = room.size.y;
+
+				}
+
 				w ++;
 
 			}
@@ -141,6 +155,8 @@ function bakeGroups( groups, paint = 0, houseId = 0 ) {
 	geometry.setAttribute( 'partId', new BufferAttribute( partId, 1 ) );
 	geometry.setAttribute( 'paint', new BufferAttribute( paints, 1 ) );
 	geometry.setAttribute( 'houseId', new BufferAttribute( houseIds, 1 ) );
+	geometry.setAttribute( 'roomCenter', new BufferAttribute( roomCenter, 3 ) );
+	geometry.setAttribute( 'roomSize', new BufferAttribute( roomSize, 2 ) );
 
 	geometry.boundingSphere = new Sphere(
 		new Vector3( ( minX + maxX ) / 2, ( minY + maxY ) / 2, ( minZ + maxZ ) / 2 ),
@@ -283,9 +299,10 @@ class HouseGenerator {
 		const terraceBoxes = []; // flat cotto terrace floors
 		const wallBoxes = []; // parapets
 		const glass = []; // window panes ( unit planes )
+		const glassRooms = []; // per-pane interior-mapping room ( centre + size ), aligned with `glass`
 		const doors = [];
 
-		const modules = { trim, shutters, rails, stone, glass, doors };
+		const modules = { trim, shutters, rails, stone, glass, glassRooms, doors };
 
 		// front and back facades; the back is plainer ( fewer, smaller openings ),
 		// as it usually faces the hill or the next terrace up
@@ -354,7 +371,7 @@ class HouseGenerator {
 		if ( rails.length > 0 ) groups.push( { geometry: _unitBox, matrices: rails, partId: RAIL } );
 		if ( stone.length > 0 ) groups.push( { geometry: _unitBox, matrices: stone, partId: STONE } );
 		if ( doors.length > 0 ) groups.push( { geometry: nonIndexed( new PlaneGeometry( 1, 1 ) ), matrices: doors, partId: DOOR } );
-		if ( glass.length > 0 ) groups.push( { geometry: nonIndexed( new PlaneGeometry( 1, 1 ) ), matrices: glass, partId: GLASS } );
+		if ( glass.length > 0 ) groups.push( { geometry: nonIndexed( new PlaneGeometry( 1, 1 ) ), matrices: glass, partId: GLASS, rooms: glassRooms } );
 
 		const paint = p.paint >= 0 ? p.paint : Math.floor( random() * housePalette.length );
 		const geometry = bakeGroups( groups, paint, random() );
@@ -469,14 +486,19 @@ function buildFacade( extras, modules, w, d, t, eaves, p, random, rotationY, wit
 				const blank = back ? 0.35 : ( f === 0 ? 0.35 : 0.1 );
 				if ( random() < blank ) continue;
 
+				// the room this opening looks into: one interior per floor, spanning
+				// the facade, so neighbouring windows share it
+				const floorBase = f * p.floorHeight;
+				const roomWidth = Math.max( 1.4, w - 1.1 );
+
 				if ( f > 0 && ! back && random() < p.balconyChance ) {
 
-					openings.push( { kind: 'french', cx, sill: f * p.floorHeight + 0.02, ow, oh: 2.15 } );
+					openings.push( { kind: 'french', cx, sill: floorBase + 0.02, ow, oh: 2.15, floorBase, roomWidth } );
 
 				} else {
 
-					const sill = f * p.floorHeight + ( f === 0 ? 1.05 : 0.95 );
-					openings.push( { kind: 'window', cx, sill, ow: back ? ow * 0.85 : ow, oh: back ? oh * 0.9 : oh } );
+					const sill = floorBase + ( f === 0 ? 1.05 : 0.95 );
+					openings.push( { kind: 'window', cx, sill, ow: back ? ow * 0.85 : ow, oh: back ? oh * 0.9 : oh, floorBase, roomWidth } );
 
 				}
 
@@ -537,7 +559,7 @@ function buildGableWall( extras, modules, w, d, t, eaves, ridge, p, random, side
 			if ( random() < 0.35 ) continue;
 
 			const cz = ( random() - 0.5 ) * ( d * 0.3 );
-			openings.push( { kind: 'window', cx: cz, sill: f * p.floorHeight + 0.95, ow: p.openingWidth * 0.85, oh: p.openingHeight * 0.9 } );
+			openings.push( { kind: 'window', cx: cz, sill: f * p.floorHeight + 0.95, ow: p.openingWidth * 0.85, oh: p.openingHeight * 0.9, floorBase: f * p.floorHeight, roomWidth: Math.max( 1.4, d * 0.55 ) } );
 
 		}
 
@@ -579,7 +601,7 @@ function buildGableWall( extras, modules, w, d, t, eaves, ridge, p, random, side
 // authored on the +Z facade of a house `depth` deep, then spun into place.
 function addOpening( modules, o, depth, p, random, rotationY ) {
 
-	const { trim, shutters, rails, stone, glass, doors } = modules;
+	const { trim, shutters, rails, stone, glass, glassRooms, doors } = modules;
 
 	const face = depth / 2; // the outer wall plane
 	const cy = o.sill + o.oh / 2;
@@ -613,9 +635,15 @@ function addOpening( modules, o, depth, p, random, rotationY ) {
 
 	}
 
-	// glazing, set back into the reveal so the opening keeps real depth
+	// glazing, set back into the reveal so the opening keeps real depth, each
+	// pane recording the floor-wide room it looks into ( in house-local space,
+	// spun with the facade like everything else )
 
 	glass.push( rotate( planeMatrix( o.cx, cy, face - 0.13, o.ow - 0.04, o.oh - 0.04 ) ) );
+
+	const center = new Vector3( 0, o.floorBase + p.floorHeight / 2, face - 0.13 );
+	if ( rotationY !== 0 ) center.applyMatrix4( _matrix.makeRotationY( rotationY ) );
+	glassRooms.push( { center, size: new Vector2( o.roomWidth, p.floorHeight - 0.5 ) } );
 
 	// sill: a small slab under the opening, proud of the surround
 
@@ -882,6 +910,197 @@ const valueFractal = ( p, octaves ) => {
 
 };
 
+// interior mapping: fakes a furnished room behind each pane in the fragment
+// shader — no geometry, no texture. every pane carries the room it looks into
+// ( centre + size, baked per opening, one room per floor ), so the windows of a
+// floor share one interior. the view ray is cast into that box and whatever it
+// meets — cotto floor, beamed ceiling, whitewashed walls, a few pieces of dark
+// old furniture — is shaded procedurally from a per-room hash. returns
+// vec4( colour, lit ).
+const interior = /*@__PURE__*/ Fn( () => {
+
+	// flat so floor() below can't split one pane across two cell ids ( centre is per-room )
+	const roomCenter = varying( attribute( 'roomCenter', 'vec3' ) ).setInterpolation( InterpolationSamplingType.FLAT, InterpolationSamplingMode.EITHER );
+	const roomSize = attribute( 'roomSize', 'vec2' ).max( vec2( 1.3, 1.5 ) ); // roomless glass ( the campanile's belfry ) still resolves a plausible dark chamber
+
+	// a per-face frame from the geometry normal ( holds on every facade ):
+	// u runs across the face, v is up, n points outward
+	const n = normalLocal;
+	const up = vec3( 0, 1, 0 );
+	const uAxis = cross( up, n ).normalize();
+
+	// this pixel and the view ray, in the room's ( across, up, depth ) frame;
+	// depth runs into the wall, so the ray's depth component is positive
+	const d = positionLocal.sub( roomCenter );
+	const camLocal = modelWorldMatrixInverse.mul( vec4( cameraPosition, 1 ) ).xyz;
+	const rayLocal = positionLocal.sub( camLocal ).normalize();
+	const origin = vec3( dot( d, uAxis ), d.y, 0 );
+	const dir = vec3( dot( rayLocal, uAxis ), rayLocal.y, dot( rayLocal, n ).negate() );
+
+	// the room box: floor-wide and floor-high, set back behind the glass and a
+	// little deeper than it is tall. shade the far side the ray exits ( slab
+	// method: nearest of the three far-plane crossings; dividing by a near-zero
+	// direction gives ±inf, which min() harmlessly drops ).
+	const setback = float( 0.08 );
+	const boxMax = vec3( roomSize.x.mul( 0.5 ), roomSize.y.mul( 0.5 ), setback.add( roomSize.y.mul( 1.6 ) ) );
+	const boxMin = vec3( boxMax.x.negate(), boxMax.y.negate(), setback );
+	const tFar = boxMin.sub( origin ).div( dir ).max( boxMax.sub( origin ).div( dir ) );
+	const t = tFar.x.min( tFar.y ).min( tFar.z );
+	const hit = origin.add( dir.mul( t ) );
+	const q = hit.sub( boxMin ).div( boxMax.sub( boxMin ) ); // 0..1 inside the room
+
+	const onBack = q.z.greaterThan( 0.998 );
+	const onCeil = q.y.greaterThan( 0.998 );
+	const onFloor = q.y.lessThan( 0.002 );
+
+	// per-room key for a portable integer hash — fract( sin() ) isn't bit-exact
+	// across drivers. rooms bake in house-local space, where different houses'
+	// floors land on near-identical centres, so the per-house id is folded in
+	// to keep every interior its own.
+	const cell = floor( roomCenter.mul( 2.0 ) );
+	const ckey = uint( cell.x.add( 1 << 21 ) ).mul( uint( 73856093 ) )
+		.bitXor( uint( cell.y.add( 1 << 21 ) ).mul( uint( 19349663 ) ) )
+		.bitXor( uint( cell.z.add( 1 << 21 ) ).mul( uint( 83492791 ) ) )
+		.bitXor( uint( attribute( 'houseId', 'float' ).mul( 65535 ) ) ).toVar();
+	const hash = ( kx, ky, kz ) => ihash( ckey.add( uint( Math.round( ( kx + ky * 7 + kz * 13 ) * 100 ) ) ) );
+	const seed = hash( 12.9898, 78.233, 37.719 );
+	const seed2 = hash( 39.346, 11.135, 83.155 );
+	const lit = step( 0.84, hash( 63.21, 9.17, 51.43 ) ); // a few lamps burn even in daylight; toward dusk they carry the facade
+	const lightCol = mix( color( 0xffb845 ), color( 0xffdf9a ), hash( 27.1, 4.9, 61.7 ) ); // village bulbs all run warm, candle-glow to tungsten
+
+	// depth falloff ( dimmer toward the back, kept warm — daylight bounces off
+	// these pale walls ), and a panel mask on a face given its two 0..1
+	// coordinates — used for the flat fittings below
+	const depth = roomSize.y.mul( 1.6 );
+	const falloffAt = ( z ) => mix( vec3( 1.0, 1.0, 1.0 ), vec3( 0.52, 0.47, 0.4 ), z.sub( setback ).div( depth ).clamp( 0, 1 ) );
+	const rect = ( ax, ay, cx, cy, hw, hh ) => smoothstep( hw + 0.006, hw - 0.006, ax.sub( cx ).abs() ).mul( smoothstep( hh + 0.006, hh - 0.006, ay.sub( cy ).abs() ) );
+
+	// --- the room shell: walls, floor, ceiling, back wall ---------------------
+
+	// whitewash and warm plasters — an ochre wash in some rooms, a muted sage in
+	// a few parlours — over a darker skirting line at the wall foot
+	let wall = mix( color( 0xcfc4ac ), color( 0xdcd1b8 ), seed );
+	wall = select( hash( 5.5, 2.2, 8.8 ).greaterThan( 0.72 ), mix( color( 0xbda374 ), color( 0xcbb384 ), seed ), wall );
+	wall = select( hash( 9.1, 3.3, 1.2 ).greaterThan( 0.92 ), mix( color( 0x97a48c ), color( 0xa7b29a ), seed ), wall );
+	const wallCol = mix( wall, wall.mul( 0.45 ), smoothstep( 0.06, 0.05, q.y ) );
+
+	// a cotto tile floor — the same fired orange as the roofs — under a woven rug
+	const tileSeam = step( 0.92, fract( q.x.mul( 7 ) ) ).max( step( 0.92, fract( q.z.mul( 9 ) ) ) );
+	const cotto = mix( color( 0x8a4f30 ), color( 0xa8663f ), seed ).mul( tileSeam.mul( 0.3 ).oneMinus() );
+	const rug = mix( color( 0x7a3b32 ), color( 0x51604f ), seed2 );
+	const floorCol = mix( cotto, rug, rect( q.x, q.z, 0.5, 0.6, 0.28, 0.24 ).mul( 0.9 ) );
+
+	// the ceiling: dark chestnut beams over pale plaster, with a small lamp
+	// mid-room; in a lit room the fixture reads bright and glows ( the
+	// material's emissive = colour × lit )
+	const beams = step( 0.84, fract( q.x.mul( mix( float( 4 ), float( 6 ), seed ) ) ) );
+	const lamp = smoothstep( 0.15, 0.12, vec2( q.x.sub( 0.5 ), q.z.sub( 0.5 ) ).length() );
+	let ceilCol = mix( mix( wall, color( 0xf2ecdc ), 0.55 ), color( 0x453424 ), beams.mul( 0.85 ) );
+	ceilCol = mix( ceilCol, lightCol.mul( mix( float( 1.0 ), float( 4.5 ), lit ) ), lamp );
+
+	// back wall: a panelled door to one side, and a small dark-framed print
+	// kept on the opposite half of the wall so it never lands on the door
+	const doorX = mix( float( 0.22 ), float( 0.78 ), seed );
+	const door = mix( color( 0x5a4631 ), color( 0x6b5136 ), seed2 );
+	const picX = select( doorX.lessThan( 0.5 ), mix( float( 0.66 ), float( 0.84 ), seed2 ), mix( float( 0.16 ), float( 0.34 ), seed2 ) );
+	const picCol = mix( color( 0x39506b ), color( 0x8a5a3a ), hash( 5.1, 9.2, 3.3 ) );
+	let backCol = mix( wallCol, door, rect( q.x, q.y, doorX, 0.34, 0.085, 0.36 ) );
+	backCol = mix( backCol, color( 0x1c1712 ), rect( q.x, q.y, picX, 0.58, 0.06, 0.075 ) ); // dark frame
+	backCol = mix( backCol, picCol, rect( q.x, q.y, picX, 0.58, 0.045, 0.06 ) ); // the print
+
+	const shellCol = select( onBack, backCol, select( onCeil, ceilCol, select( onFloor, floorCol, wallCol ) ) );
+
+	// fake ambient occlusion: darken the hit toward the room's edges ( where two
+	// surfaces meet ), so the box reads with soft corner shading instead of
+	// flat-lit walls
+	const aoBand = 0.15;
+	const aoEdge = ( a ) => smoothstep( 0, aoBand, a ).mul( smoothstep( 0, aoBand, a.oneMinus() ) );
+	const edgeAO = select( onBack, aoEdge( q.x ).mul( aoEdge( q.y ) ), select( onFloor.or( onCeil ), aoEdge( q.x ).mul( aoEdge( q.z ) ), aoEdge( q.y ).mul( aoEdge( q.z ) ) ) );
+	const shellAO = mix( float( 0.7 ), float( 1.0 ), edgeAO );
+
+	// --- nearest surface: the shell, then any furniture that stands closer ----
+	// each piece is a solid axis-aligned box in room space; boxHit returns its
+	// near face. consider() keeps whichever surface the ray meets first.
+	let bestT = t;
+	let bestCol = shellCol.mul( shellAO ).mul( falloffAt( hit.z ) );
+	let bestEmit = float( 1 ); // per-hit emissive weight: shell and fittings emit fully, sheers far less
+
+	const boxHit = ( bMin, bMax ) => {
+
+		const ta = bMin.sub( origin ).div( dir );
+		const tb = bMax.sub( origin ).div( dir );
+		const lo = ta.min( tb ), hi = ta.max( tb );
+		const tN = lo.x.max( lo.y ).max( lo.z );
+		const p = origin.add( dir.mul( tN ) );
+		return { tN, p, hit: hi.x.min( hi.y ).min( hi.z ).greaterThan( tN ).and( tN.greaterThan( 0 ) ), qb: p.sub( bMin ).div( bMax.sub( bMin ) ) };
+
+	};
+
+	const consider = ( h, tN, c, emit = 1 ) => {
+
+		const near = h.and( tN.lessThan( bestT ) ); bestCol = select( near, c, bestCol ); bestEmit = select( near, float( emit ), bestEmit ); bestT = select( near, tN, bestT );
+
+	};
+
+	const halfU = boxMax.x, floorY = boxMin.y, ceilY = boxMax.y, backZ = boxMax.z;
+	const midZ = setback.add( depth.mul( 0.5 ) );
+
+	// the kitchen table, mid-room, in waxed olive wood ( its top catches the light )
+	const tCx = mix( float( - 0.5 ), float( 0.5 ), seed );
+	const tCz = midZ.add( mix( float( - 0.4 ), float( 0.4 ), seed2 ) );
+	const tbl = boxHit( vec3( tCx.sub( 0.55 ), floorY, tCz.sub( 0.35 ) ), vec3( tCx.add( 0.55 ), floorY.add( 0.45 ), tCz.add( 0.35 ) ) );
+	const tblCol = mix( color( 0x6b4a28 ), color( 0x8a6335 ), seed2 ).mul( select( tbl.qb.y.greaterThan( 0.93 ), float( 1.25 ), float( 0.8 ) ) );
+	consider( tbl.hit, tbl.tN, tblCol.mul( falloffAt( tbl.p.z ) ) );
+
+	// a low credenza against the back wall, its top set with a pale runner
+	const crCx = mix( halfU.mul( - 0.3 ), halfU.mul( 0.3 ), seed2 );
+	const cr = boxHit( vec3( crCx.sub( 0.8 ), floorY, backZ.sub( 0.5 ) ), vec3( crCx.add( 0.8 ), floorY.add( mix( float( 0.85 ), float( 1.0 ), seed ) ), backZ.sub( 0.08 ) ) );
+	const crCol = mix( color( 0x453222 ), color( 0x5c452e ), seed ).mul( select( cr.qb.y.greaterThan( 0.92 ), float( 1.3 ), float( 0.82 ) ) );
+	consider( cr.hit, cr.tN, crCol.mul( falloffAt( cr.p.z ) ) );
+
+	// tall madie ( dressers ) in the back corners — each side stands in some rooms
+	const dresser = ( cx, gate, h ) => {
+
+		const w = boxHit( vec3( cx.sub( 0.45 ), floorY, backZ.sub( 0.55 ) ), vec3( cx.add( 0.45 ), floorY.add( h ), backZ.sub( 0.08 ) ) );
+		const c = mix( color( 0x33261a ), color( 0x4a392a ), seed ).mul( select( w.qb.y.greaterThan( 0.93 ), float( 1.2 ), float( 0.82 ) ) );
+		consider( w.hit.and( gate ), w.tN, c.mul( falloffAt( w.p.z ) ) );
+
+	};
+
+	dresser( halfU.mul( - 0.82 ), hash( 7.3, 2.1, 9.9 ).greaterThan( 0.45 ), mix( float( 1.6 ), float( 2.1 ), seed ) );
+	dresser( halfU.mul( 0.82 ), hash( 3.7, 8.4, 1.5 ).greaterThan( 0.45 ), mix( float( 1.6 ), float( 2.1 ), seed2 ) );
+
+	// sheers hung just inside the glass: lace and ecru mostly, the odd striped
+	// or terracotta pair, drawn part-way in from each side
+	const swatch = ( a, b ) => mix( color( a ), color( b ), seed2 );
+	const pick = hash( 22.4, 6.7, 91.2 ).mul( 4 ); // 0..4, one bucket per family
+	let fabric = swatch( 0xe0dacb, 0xece7d9 ); // white lace — the default on every alley
+	fabric = select( pick.greaterThan( 1.6 ), swatch( 0xcfc4a8, 0xdcd2b8 ), fabric ); // ecru
+	fabric = select( pick.greaterThan( 2.8 ), swatch( 0x9a8f72, 0xb0a586 ), fabric ); // faded olive stripe
+	fabric = select( pick.greaterThan( 3.6 ), swatch( 0x9a6a52, 0xac7a5e ), fabric ); // terracotta
+	const drape = ( bMin, bMax, gate ) => {
+
+		const h = boxHit( bMin, bMax );
+		const pleat = fabric.mul( mix( float( 0.8 ), float( 1.1 ), fract( h.p.x.mul( 3.5 ) ) ) ); // soft vertical pleats
+		consider( h.hit.and( gate ), h.tN, pleat.mul( falloffAt( h.p.z ) ), 0.3 ); // a sheer only mutes the room's glow, never blocks it
+
+	};
+
+	const cz0 = setback, cz1 = setback.add( 0.1 );
+	// sheer widths, biased narrow ( squared ) and each capped at half the room
+	// width, so most windows read airy and open
+	const sL = smoothstep( 0.3, 1.0, seed ), sR = smoothstep( 0.3, 1.0, seed2 );
+	const lw = halfU.mul( sL.mul( sL ) );
+	const rw = halfU.mul( sR.mul( sR ) );
+	drape( vec3( halfU.negate(), floorY, cz0 ), vec3( halfU.negate().add( lw ), ceilY, cz1 ), lw.greaterThan( 0.05 ) );
+	drape( vec3( halfU.sub( rw ), floorY, cz0 ), vec3( halfU, ceilY, cz1 ), rw.greaterThan( 0.05 ) );
+
+	// lit rooms read brighter and take on the warmth of their bulb
+	const warmth = mix( vec3( 1.0, 1.0, 1.0 ), lightCol, lit.mul( 0.85 ) );
+	return vec4( bestCol.mul( warmth ).mul( mix( float( 1.0 ), float( 1.35 ), lit ) ), lit.mul( bestEmit ) );
+
+} );
+
 /**
  * The colour-washed palette of the Ligurian coast ( hex colours ): ochres and
  * warm yellows lead, cut with terracotta oranges, the odd deep coral red, dusty
@@ -1008,9 +1227,15 @@ function createHouseMaterial() {
 		.mul( cottoJoint.mul( 0.3 ).oneMinus() )
 		.mul( float( 1 ).add( tone ) );
 
-	// glazing: near-black glass with a per-pane tint, the sky reflection does the rest
+	// glazing: the interior-mapped room is the base colour, seen through a light
+	// film of dust and shade — village glass runs cleaner than a city's — and
+	// the smooth surface still carries the sky's reflection over it. toVar so
+	// the raymarch runs once, shared by the colour and emissive outputs.
+	const room = interior().toVar();
 	const pane = valueNoise( positionWorld.mul( 1.1 ) ).mul( 0.5 ).add( 0.5 );
-	const glassColor = mix( color( 0x11161d ), color( 0x2a3540 ), pane );
+	const shadeGlass = mix( color( 0x1c2126 ), color( 0x2e363c ), pane );
+	const haze = pane.mul( 0.18 ).add( 0.32 ); // enough film that the panes read as glass, not open holes
+	const glassColor = mix( room.xyz.mul( color( 0xc3ccc2 ) ), shadeGlass, haze ); // faint soda-lime tint over the room
 
 	// doors: vertical planks in dark wood, seams keyed to the leaf's metric UV
 	const plank = fract( uv().x.mul( 4.5 ) );
@@ -1056,6 +1281,7 @@ function createHouseMaterial() {
 
 	material.roughnessNode = select( isGlass, float( 0.14 ), select( isRail, float( 0.5 ), select( isTerrace, float( 0.85 ), float( 0.95 ) ) ) );
 	material.metalnessNode = select( isRail, float( 0.55 ), float( 0 ) );
+	material.emissiveNode = select( isGlass, room.xyz.mul( room.w ).mul( 5 ).mul( haze.mul( 0.7 ).oneMinus() ), color( 0x000000 ) ); // room.w = emissive weight ( 0 unlit, < 1 behind sheers ), muted by the film
 
 	// relief: barrel-tile ridges on the roofs, recessed joints on the terrace
 	// cotto and brick coursing, a soft plaster / stone grain elsewhere; glass
