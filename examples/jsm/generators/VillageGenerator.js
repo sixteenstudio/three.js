@@ -17,10 +17,10 @@ import {
 } from 'three';
 
 import { MeshStandardNodeMaterial } from 'three/webgpu';
-import { attribute, cameraPosition, color, float, mix, normalWorld, positionView, positionWorld, normalView, saturation, smoothstep, time, vec3 } from 'three/tsl';
+import { attribute, cameraPosition, color, float, Fn, If, mix, positionLocal, positionView, positionWorld, normalView, saturation, smoothstep, time, vec3 } from 'three/tsl';
 
 import { ImprovedNoise } from '../math/ImprovedNoise.js';
-import { HouseGenerator, createHouseMaterial, housePalette, bakeGroups, boxMatrix, valueNoise, valueFractal, PartId } from './village/HouseGenerator.js';
+import { HouseGenerator, createHouseMaterial, housePalette, bakeGroups, boxMatrix, gridLine, valueNoise, valueFractal, PartId } from './village/HouseGenerator.js';
 
 const _matrix = /*@__PURE__*/ new Matrix4();
 const _unitBox = /*@__PURE__*/ new BoxGeometry( 1, 1, 1 ).toNonIndexed();
@@ -175,7 +175,7 @@ class VillageGenerator {
 VillageGenerator.defaults = {
 	seed: 1,
 	size: 520, // world units across the square terrain patch
-	segments: 384, // grid quads per side — ~1.35 m cells, enough for the terrace stamps
+	segments: 768, // grid quads per side — ~0.7 m cells, enough for crisp terrace steps
 	scrubCount: 3200 // maquis blobs scattered over the slopes ( one instanced draw )
 };
 
@@ -405,6 +405,48 @@ class Polyline {
 
 }
 
+// oriented-rectangle overlap ( separating axes ), for the layout claims below
+function rectsOverlap( a, b ) {
+
+	for ( const [ p, q ] of [[ a, b ], [ b, a ]] ) {
+
+		const dx = q.cx - p.cx;
+		const dz = q.cz - p.cz;
+
+		// q's half extents projected onto p's axes
+		const uu = Math.abs( q.hw * ( q.cos * p.cos + q.sin * p.sin ) ) + Math.abs( q.hd * ( q.sin * p.cos - q.cos * p.sin ) );
+		const vv = Math.abs( q.hw * ( q.cos * p.sin - q.sin * p.cos ) ) + Math.abs( q.hd * ( q.sin * p.sin + q.cos * p.cos ) );
+
+		if ( Math.abs( dx * p.cos + dz * p.sin ) > p.hw + uu ) return false;
+		if ( Math.abs( - dx * p.sin + dz * p.cos ) > p.hd + vv ) return false;
+
+	}
+
+	return true;
+
+}
+
+// whether a candidate house would collide with what stands already: its
+// footprint must stay off every prior claim, and the clear strip its facade
+// needs must not run into another building's mass — unless that building sits
+// entirely below this one's ground, where it can't obstruct anything
+function blocked( claims, count, foot, apron ) {
+
+	for ( let i = 0; i < count; i ++ ) {
+
+		const claim = claims[ i ];
+
+		if ( claim.top < foot.base + 1 ) continue; // e.g. a quay far below a cliff row
+
+		if ( rectsOverlap( claim, foot ) ) return true;
+		if ( claim.solid && rectsOverlap( claim, apron ) ) return true;
+
+	}
+
+	return false;
+
+}
+
 // the coastline offset inland by `offset`, over the given x window — the natural
 // path for a row of houses that hugs the shore
 function offsetCoastPath( coast, x0, x1, offset ) {
@@ -438,13 +480,25 @@ function offsetCoastPath( coast, x0, x1, offset ) {
 }
 
 // walks houses along a path: contiguous facades, party walls shared, each house
-// snapped to its own base height — the stepped rows of the coast
+// snapped to its own base height — the stepped rows of the coast. a candidate
+// is only placed where it fits: its footprint ( and the clear ground a facade
+// needs in front of it ) is tested against every claim laid by earlier rows, so
+// rows stop short of one another instead of running together.
 function layoutRow( layout, random, path, options ) {
 
-	const { elevation, facing = 1, depth, floorsMin = 2, floorsMax = 4, margin = 2, gap = 0 } = options;
+	const { elevation, facing = 1, depth, floorsMin = 2, floorsMax = 4, margin = 2 } = options;
+
+	const fixed = layout.claims.length; // houses of this row attach to each other freely
 
 	let s = margin;
 	let previous = null;
+
+	const endRun = () => {
+
+		if ( previous ) previous.parameters.rightExposed = true;
+		previous = null;
+
+	};
 
 	while ( s < path.length - margin - 5 ) {
 
@@ -458,6 +512,22 @@ function layoutRow( layout, random, path, options ) {
 		const nz = - at.tx * facing;
 
 		const base = Math.round( elevation( s + width / 2 ) * 2 ) / 2;
+		const d = depth + ( random() - 0.5 );
+
+		// footprint centre sits half a depth behind the facade line
+		const x = at.x - nx * d / 2;
+		const z = at.z - nz * d / 2;
+
+		const foot = { cx: x, cz: z, hw: width / 2 + 0.3, hd: d / 2 + 0.3, cos: nz, sin: nx, base, top: base + floorsMax * 3.2 + 2.5, solid: true };
+		const apron = { cx: at.x + nx * 0.75, cz: at.z + nz * 0.75, hw: width / 2, hd: 0.75, cos: nz, sin: nx, base, top: base + 2.5, solid: false };
+
+		if ( blocked( layout.claims, fixed, foot, apron ) ) {
+
+			endRun(); // the row breaks here; whatever follows starts a new run
+			s += 2.5;
+			continue;
+
+		}
 
 		let floors = floorsMin + Math.floor( random() * ( floorsMax - floorsMin + 1 ) );
 		if ( previous && floors === previous.floors && base === previous.base ) floors = floors === floorsMax ? floors - 1 : floors + 1;
@@ -465,12 +535,6 @@ function layoutRow( layout, random, path, options ) {
 		// paint pick avoiding the neighbour's, so no two attached houses match
 		let paint = Math.floor( random() * housePalette.length );
 		if ( previous && paint === previous.paint ) paint = ( paint + 3 + Math.floor( random() * 5 ) ) % housePalette.length;
-
-		const d = depth + ( random() - 0.5 );
-
-		// footprint centre sits half a depth behind the facade line
-		const x = at.x - nx * d / 2;
-		const z = at.z - nz * d / 2;
 
 		const house = {
 			x, z, base,
@@ -485,28 +549,29 @@ function layoutRow( layout, random, path, options ) {
 				paint,
 				podiumDepth: 10,
 				leftExposed: previous === null,
-				rightExposed: false // set true on whichever house ends the row
+				rightExposed: false // set true on whichever house ends the run
 			}
 		};
 
 		layout.houses.push( house );
+		layout.claims.push( foot, apron );
 
 		// the terrace: a flat shelf under the house and its walk, feathered into
 		// the hill, with a hair of drop so podium tops never poke through
 		layout.stamps.push( {
 			cx: x + nx * 1.2, cz: z + nz * 1.2,
-			hw: width / 2 + 1.5, hd: d / 2 + 3.4,
+			hw: width / 2 + 0.6, hd: d / 2 + 3.4,
 			cos: nz, sin: nx,
-			feather: 6,
+			feather: 5,
 			h: base - 0.05
 		} );
 
 		previous = house;
-		s += width + gap;
+		s += width;
 
 	}
 
-	if ( previous ) previous.parameters.rightExposed = true;
+	endRun();
 
 }
 
@@ -530,7 +595,7 @@ function layoutLane( layout, path, elevation, radius ) {
  */
 function buildLayout( p, random, coast ) {
 
-	const layout = { houses: [], stamps: [], street: null };
+	const layout = { houses: [], stamps: [], claims: [], street: null };
 
 	const coveX = coast.coveX;
 
@@ -578,6 +643,40 @@ function buildLayout( p, random, coast ) {
 		} );
 
 	}
+
+	// the harbour front: a short bright row at the cove head, facing the water
+
+	const harbourZ = coast.coastZ( coveX ) - 7;
+	const harbourPath = new Polyline( [
+		new Vector2( coveX - 20, harbourZ - 2 ),
+		new Vector2( coveX, harbourZ - 3.5 ),
+		new Vector2( coveX + 20, harbourZ - 2 )
+	] );
+
+	layoutRow( layout, random, harbourPath, {
+		elevation: () => 4.5,
+		facing: - 1,
+		depth: 8 + random(),
+		floorsMin: 3, // the harbour houses are the tall postcard ones
+		floorsMax: 5,
+		margin: 1
+	} );
+
+	layout.harbour = { x: coveX, z: harbourZ };
+
+	// the quay apron in front of the harbour row: its stamp holds the ground
+	// under the paving still, its claim keeps later rows off it
+
+	layout.stamps.push( { cx: coveX, cz: harbourZ + 6, hw: 21, hd: 6, cos: 1, sin: 0, feather: 5, h: 2.1 } );
+	layout.claims.push( { cx: coveX, cz: harbourZ + 6, hw: 21, hd: 6, cos: 1, sin: 0, base: 2.1, top: 2.6, solid: true } );
+
+	// the campanile watches from the top of the headland cluster
+
+	const bell = offsetCoastPath( coast, - 80, - 40, 12 + westRows * 11 ).sample( 12 );
+	layout.campanile = { x: bell.x, z: bell.z, base: Math.max( 6, coast.baseHeight( bell.x, bell.z ) + 1 ) };
+
+	layout.stamps.push( { cx: layout.campanile.x, cz: layout.campanile.z, r: 8, feather: 6, h: layout.campanile.base - 0.05 } );
+	layout.claims.push( { cx: layout.campanile.x, cz: layout.campanile.z, hw: 4.5, hd: 4.5, cos: 1, sin: 0, base: layout.campanile.base, top: layout.campanile.base + 18, solid: true } );
 
 	// the street: a pair of facing rows stepping down the ravine to the harbour.
 	// its profile follows the valley floor, smoothed monotonic so it only descends.
@@ -643,38 +742,6 @@ function buildLayout( p, random, coast ) {
 
 	}
 
-	// the harbour front: a short bright row at the cove head, facing the water
-
-	const harbourZ = coast.coastZ( coveX ) - 7;
-	const harbourPath = new Polyline( [
-		new Vector2( coveX - 20, harbourZ - 2 ),
-		new Vector2( coveX, harbourZ - 3.5 ),
-		new Vector2( coveX + 20, harbourZ - 2 )
-	] );
-
-	layoutRow( layout, random, harbourPath, {
-		elevation: () => 4.5,
-		facing: - 1,
-		depth: 8 + random(),
-		floorsMin: 3, // the harbour houses are the tall postcard ones
-		floorsMax: 5,
-		margin: 1
-	} );
-
-	layout.harbour = { x: coveX, z: harbourZ };
-
-	// the quay apron in front of the harbour row, and its stamp so the ground
-	// under the paving holds still
-
-	layout.stamps.push( { cx: coveX, cz: harbourZ + 6, hw: 21, hd: 6, cos: 1, sin: 0, feather: 5, h: 2.1 } );
-
-	// the campanile watches from the top of the headland cluster
-
-	const bell = offsetCoastPath( coast, - 80, - 40, 12 + westRows * 11 ).sample( 12 );
-	layout.campanile = { x: bell.x, z: bell.z, base: Math.max( 6, coast.baseHeight( bell.x, bell.z ) + 1 ) };
-
-	layout.stamps.push( { cx: layout.campanile.x, cz: layout.campanile.z, r: 8, feather: 6, h: layout.campanile.base - 0.05 } );
-
 	return layout;
 
 }
@@ -722,7 +789,13 @@ function bakeTerrain( p, coast, layout ) {
 
 	}
 
-	// press the stamps in: rectangles under houses, discs along lanes
+	// press the stamps in: rectangles under houses, discs along lanes. where
+	// terraces overlap, the heights are blended by sharpened weights — the
+	// nearest terrace wins — so a neighbour's higher shelf can never ride over
+	// another house's doorstep the way a last-one-wins pass would.
+
+	const stampWeight = new Float32Array( N * N );
+	const stampHeight = new Float32Array( N * N );
 
 	for ( const s of layout.stamps ) {
 
@@ -758,12 +831,20 @@ function bakeTerrain( p, coast, layout ) {
 				if ( w <= 0 ) continue;
 
 				const i = iz * N + ix;
-				heights[ i ] += ( s.h - heights[ i ] ) * w;
+				const sharp = w * w * w;
+				stampWeight[ i ] += sharp;
+				stampHeight[ i ] += sharp * s.h;
 				if ( w > paved[ i ] ) paved[ i ] = w;
 
 			}
 
 		}
+
+	}
+
+	for ( let i = 0; i < N * N; i ++ ) {
+
+		if ( stampWeight[ i ] > 0 ) heights[ i ] += ( stampHeight[ i ] / stampWeight[ i ] - heights[ i ] ) * paved[ i ];
 
 	}
 
@@ -800,9 +881,51 @@ function bakeTerrain( p, coast, layout ) {
 
 	}
 
+	// surface flatness baked per vertex from the height grid and smoothed a
+	// touch: banding the material on this ( rather than on the mesh normal,
+	// which is constant per triangle ) keeps the grass / rock line from
+	// flickering tooth-by-tooth along ridges
+	let flatness = new Float32Array( N * N );
+
+	for ( let iz = 0; iz < N; iz ++ ) {
+
+		for ( let ix = 0; ix < N; ix ++ ) {
+
+			const l = heights[ iz * N + Math.max( 0, ix - 1 ) ];
+			const r = heights[ iz * N + Math.min( N - 1, ix + 1 ) ];
+			const u = heights[ Math.max( 0, iz - 1 ) * N + ix ];
+			const d = heights[ Math.min( N - 1, iz + 1 ) * N + ix ];
+			const dx = ( r - l ) / ( 2 * cell );
+			const dz = ( d - u ) / ( 2 * cell );
+
+			flatness[ iz * N + ix ] = 1 / Math.sqrt( 1 + dx * dx + dz * dz );
+
+		}
+
+	}
+
+	for ( let pass = 0; pass < 2; pass ++ ) {
+
+		const source = flatness;
+		flatness = Float32Array.from( source ); // borders keep their unsmoothed value
+
+		for ( let iz = 1; iz < N - 1; iz ++ ) {
+
+			for ( let ix = 1; ix < N - 1; ix ++ ) {
+
+				const i = iz * N + ix;
+				flatness[ i ] = ( source[ i ] * 2 + source[ i - 1 ] + source[ i + 1 ] + source[ i - N ] + source[ i + N ] ) / 6;
+
+			}
+
+		}
+
+	}
+
 	const geometry = new BufferGeometry();
 	geometry.setAttribute( 'position', new Float32BufferAttribute( positions, 3 ) );
 	geometry.setAttribute( 'paved', new Float32BufferAttribute( paved, 1 ) );
+	geometry.setAttribute( 'flatness', new Float32BufferAttribute( flatness, 1 ) );
 	geometry.setIndex( indices );
 	geometry.computeVertexNormals();
 
@@ -932,7 +1055,7 @@ function rockMatrix( random, x, y, z, size ) {
 function bakeSea( p, coast ) {
 
 	const span = 2600;
-	const segments = 300;
+	const segments = 400; // ~6.5 m cells — enough for the swell displacement to read
 
 	const geometry = new PlaneGeometry( span, span, segments, segments );
 	geometry.rotateX( - Math.PI / 2 );
@@ -983,19 +1106,36 @@ function bumpNormal( height ) {
 
 /**
  * The Ligurian sea: cobalt offshore, flaring turquoise over the shallow cove,
- * with wind-ruffled waves and a fringe of animated foam along the shore. Depth
- * comes baked per vertex ( see the sea grid ), so the shading costs no terrain
- * lookups.
+ * alive with swell. Long wave trains roll shoreward and physically lift the
+ * surface ( vertex displacement ), drifting chop ruffles the normal over them,
+ * crests whiten into breakers as the bed shallows, and the foam line laps up
+ * and slides back with each set. Depth comes baked per vertex ( see the sea
+ * grid ), so none of it ever samples the terrain.
  */
 function createSeaMaterial() {
 
 	const depth = attribute( 'seaDepth', 'float' );
 
-	// wind-ruffled surface: three octaves of drifting value noise become the
-	// wave height; its screen-space gradient perturbs the normal. the ruffle
-	// eases off with distance so the horizon can't shimmer.
+	// the swell: two wave trains rolling in toward the coast, gathered into
+	// sets by a slow noise so the sea breathes instead of ticking. evaluated
+	// from the surface position, so it serves the vertex displacement and the
+	// fragment normal alike.
+	const trainPhase = positionLocal.z.mul( 0.036 ).add( positionLocal.x.mul( 0.01 ) );
+	const sets = valueNoise( vec3( positionLocal.x.mul( 0.008 ), positionLocal.z.mul( 0.016 ), time.mul( 0.08 ) ) ).mul( 0.5 ).add( 0.75 );
+	const swell = trainPhase.mul( 6.283 ).add( time.mul( 0.55 ) ).sin()
+		.add( trainPhase.mul( 14.9 ).add( time.mul( 1.05 ) ).sin().mul( 0.45 ) )
+		.mul( sets );
+
+	// the swell dies over the sheltered shallows and can't lift a dry shoreline
+	const lift = smoothstep( 0.2, 4.5, depth );
+
+	const material = new MeshStandardNodeMaterial();
+	material.positionNode = positionLocal.add( vec3( 0, swell.mul( lift ).mul( 0.4 ), 0 ) );
+
+	// drifting chop over the swell: three octaves of moving value noise, eased
+	// off with distance so the horizon can't shimmer
 	const calm = smoothstep( 900, 150, positionWorld.distance( cameraPosition ) );
-	const waves = valueNoise( vec3( positionWorld.x.mul( 0.08 ), positionWorld.z.mul( 0.08 ), time.mul( 0.22 ) ) )
+	const chop = valueNoise( vec3( positionWorld.x.mul( 0.08 ), positionWorld.z.mul( 0.08 ), time.mul( 0.22 ) ) )
 		.add( valueNoise( vec3( positionWorld.x.mul( 0.21 ).add( time.mul( 0.1 ) ), positionWorld.z.mul( 0.19 ), time.mul( 0.34 ) ) ).mul( 0.5 ) )
 		.add( valueNoise( vec3( positionWorld.x.mul( 0.55 ), positionWorld.z.mul( 0.5 ).sub( time.mul( 0.16 ) ), time.mul( 0.5 ) ) ).mul( 0.25 ) )
 		.mul( calm );
@@ -1006,16 +1146,25 @@ function createSeaMaterial() {
 	let water = mix( color( 0x093052 ), color( 0x15719f ), depth.mul( - 0.09 ).exp() );
 	water = mix( water, color( 0x53dcc8 ), depth.mul( - 0.22 ).exp() );
 
-	// foam: a breathing fringe where the water thins against the shore
+	// the foam line breathes with the sets: the swell phase pushes the contact
+	// fringe up the shore and draws it back, noise ragging its edge
 	const surge = valueNoise( vec3( positionWorld.x.mul( 0.35 ), positionWorld.z.mul( 0.35 ), time.mul( 0.4 ) ) ).mul( 0.5 ).add( 0.5 );
-	const fringe = smoothstep( 1.7, 0.1, depth.add( surge ) );
-	const foam = fringe.mul( surge.mul( 0.6 ).add( 0.4 ) );
+	const lap = swell.mul( 0.4 );
+	const fringe = smoothstep( 1.6, 0.05, depth.add( surge.mul( 0.9 ) ).add( lap ) );
 
-	const material = new MeshStandardNodeMaterial();
-	material.colorNode = mix( water, color( 0xe9f6f2 ), foam );
-	material.roughnessNode = mix( float( 0.1 ), float( 0.55 ), foam );
+	// breakers: crests whiten as the swell trips over the shallowing bed
+	const breaker = smoothstep( 0.45, 0.95, swell.mul( 0.5 ).add( 0.5 ) )
+		.mul( smoothstep( 4.5, 1, depth ) )
+		.mul( surge.mul( 0.7 ).add( 0.3 ) );
+
+	// lace inside the foam, so it tears into streaks rather than filling solid
+	const lace = valueNoise( vec3( positionWorld.x.mul( 1.1 ), positionWorld.z.mul( 1.1 ), time.mul( 0.6 ) ) ).mul( 0.5 ).add( 0.65 );
+	const foam = fringe.max( breaker.mul( 0.85 ) ).mul( lace ).clamp();
+
+	material.colorNode = mix( water, color( 0xebf7f3 ), foam );
+	material.roughnessNode = mix( float( 0.09 ), float( 0.55 ), foam );
 	material.metalnessNode = float( 0 );
-	material.normalNode = bumpNormal( waves.mul( 0.3 ).mul( smoothstep( 0.4, 3, depth ).mul( 0.8 ).add( 0.2 ) ) ); // the swell settles in the sheltered shallows
+	material.normalNode = bumpNormal( chop.mul( 0.28 ).add( swell.mul( lift ).mul( 0.35 ).mul( calm.mul( 0.75 ).add( 0.25 ) ) ).mul( smoothstep( 0.3, 2.5, depth ).mul( 0.85 ).add( 0.15 ) ) );
 
 	return material;
 
@@ -1035,38 +1184,68 @@ function createTerrainMaterial() {
 	material.metalness = 0;
 
 	const distance = positionWorld.distance( cameraPosition );
+	const near = smoothstep( 130, 20, distance ); // the finest grit only resolves close in
 
-	const flatness = normalWorld.y.clamp();
+	// banding runs off the baked, smoothed flatness — the mesh normal is
+	// constant per triangle, and thresholding it saws teeth along every ridge
+	const flatness = attribute( 'flatness', 'float' ).clamp();
 	const steep = flatness.oneMinus();
 	const height = positionWorld.y;
 
-	const grain = valueNoise( positionWorld.mul( 0.16 ) );
+	// four scales of the same integer-hash noise: broad drift down to grit
 	const macro = valueNoise( positionWorld.mul( 0.02 ) );
+	const grain = valueNoise( positionWorld.mul( 0.16 ) );
+	const fine = valueNoise( positionWorld.mul( 0.6 ) );
+	const grit = Fn( () => {
+
+		const g = float( 0 ).toVar();
+
+		If( near.greaterThan( 0.01 ), () => {
+
+			g.assign( valueNoise( positionWorld.mul( 2.7 ) ).mul( near ) );
+
+		} );
+
+		return g;
+
+	} )();
 
 	// stratified cliff rock: warm grey-brown bedding planes at two frequencies,
-	// wobbled by noise — the tilted sandstone of the riviera
+	// veined by the fine noise's ridge lines and chipped by the grit
 	const bandA = height.mul( 0.55 ).add( grain.mul( 2.2 ) ).add( macro.mul( 3 ) ).sin();
-	const bandB = height.mul( 1.6 ).add( grain.mul( 3 ) ).sin();
+	const bandB = height.mul( 1.6 ).add( grain.mul( 3 ) ).add( fine ).sin();
 	const strata = bandA.mul( 0.6 ).add( bandB.mul( 0.4 ) ).mul( 0.5 ).add( 0.5 );
-	const rock = mix( color( 0x4a4336 ), color( 0x8a7d67 ), strata );
+	const veins = smoothstep( 0.78, 0.95, fine.abs().oneMinus() ).mul( 0.3 ); // dark seams where the noise ridges
+	let rock = mix( color( 0x4a4336 ), color( 0x8a7d67 ), strata );
+	rock = rock.mul( veins.oneMinus() ).mul( grit.mul( 0.2 ).add( 1 ) );
 
-	// the vegetated hill: dry maquis scrub drifting through summer-scorched grass
-	const scrub = mix( color( 0x4d5c33 ), color( 0x6d7040 ), grain.mul( 0.5 ).add( 0.5 ) );
-	const grass = mix( color( 0x97854e ), color( 0xb0a060 ), macro.mul( 0.5 ).add( 0.5 ) );
+	// the vegetated hill: dry maquis drifting through summer-scorched grass,
+	// tufted at hand scale so the green never reads as a solid fill
+	const tuft = fine.mul( 0.5 ).add( 0.5 );
+	let scrub = mix( color( 0x46552e ), color( 0x6d7040 ), tuft );
+	scrub = scrub.mul( grit.mul( 0.24 ).add( 1 ) );
+	let grass = mix( color( 0x8f7d48 ), color( 0xb0a060 ), tuft );
+	grass = mix( grass, color( 0x74683c ), smoothstep( 0.6, 0.85, valueNoise( positionWorld.mul( 0.31 ) ) ).mul( 0.7 ) ); // mown / grazed patches
+	grass = grass.mul( grit.mul( 0.18 ).add( 1 ) );
 	let surface = mix( scrub, grass, smoothstep( - 0.2, 0.6, macro ).mul( 0.75 ) );
 
 	// dry-stone shows on every steep face — sea cliffs and terracette risers
-	// alike, which is what draws the vineyard contours on the hill
-	surface = mix( surface, rock, smoothstep( 0.28, 0.5, steep ) );
+	// alike, which is what draws the vineyard contours on the hill. the fine
+	// noise dithers the threshold so the boundary wanders instead of banding.
+	surface = mix( surface, rock, smoothstep( 0.26, 0.48, steep.add( fine.mul( 0.05 ) ) ) );
 
 	// wave-washed base of the cliffs: darker, wet, with a band of algae at the swell
 	surface = mix( surface, color( 0x453f35 ), smoothstep( 2.4, 0.6, height ).mul( 0.65 ) );
 	surface = mix( surface, color( 0x39514a ), smoothstep( 1.2, 0.2, height ).mul( 0.6 ) );
 
-	// the stamped village ground: worn stone paving on the flats
+	// the stamped village ground: worn stone flags on the flats, jointed at a
+	// hand-laid metre so the lanes read paved rather than poured
 	const paved = attribute( 'paved', 'float' );
-	const paving = mix( color( 0x9a927e ), color( 0xb0a58e ), grain.mul( 0.5 ).add( 0.5 ) );
-	surface = mix( surface, paving, smoothstep( 0.35, 0.75, paved ).mul( flatness ) );
+	const flags = gridLine( positionWorld.x, 1.1, 0.02 ).max( gridLine( positionWorld.z, 1.1, 0.02 ) );
+	let paving = mix( color( 0xa2947c ), color( 0xbaab8e ), grain.mul( 0.5 ).add( 0.5 ) );
+	paving = paving.mul( flags.mul( 0.22 ).oneMinus() ).mul( grit.mul( 0.12 ).add( 1 ) );
+	const pavedMask = smoothstep( 0.35, 0.75, paved ).mul( flatness );
+	surface = mix( surface, paving, pavedMask );
 
 	// macro drift then a fine mottle, so no band reads as a flat fill
 	surface = surface.mul( macro.mul( 0.15 ).add( 0.92 ) );
@@ -1078,13 +1257,15 @@ function createTerrainMaterial() {
 	surface = mix( surface, color( 0xc9cfd4 ), aerial.mul( 0.55 ) );
 
 	material.colorNode = surface;
-	material.roughnessNode = float( 0.95 );
+	material.roughnessNode = float( 0.95 ).sub( pavedMask.mul( 0.1 ) ).add( fine.mul( 0.04 ) );
 
-	// relief, strongest on the rock faces and faded with distance so it can't
-	// shimmer into the haze
+	// relief: broad ground undulation, rock chip up close, paving joints cut in —
+	// strongest on the rock faces and faded with distance so it can't shimmer
 	const relief = valueFractal( positionWorld.mul( 0.35 ), 2 )
 		.mul( smoothstep( 340, 40, distance ) )
-		.mul( mix( float( 0.2 ), float( 0.7 ), steep ) );
+		.mul( mix( float( 0.2 ), float( 0.7 ), steep ) )
+		.add( grit.mul( 0.15 ).mul( steep.mul( 1.4 ).add( 0.3 ) ) )
+		.sub( flags.mul( pavedMask ).mul( 0.05 ) );
 	material.normalNode = bumpNormal( relief );
 
 	return material;
@@ -1204,7 +1385,8 @@ function blobGeometry() {
 }
 
 // the single material shared by every scrub blob and cypress: olive maquis rising
-// to sunlit sage, cypress running near-black green, shaded by the baked crown gradient
+// to sunlit sage, cypress running near-black green, shaded by the baked crown
+// gradient and mottled into leaf clumps close up
 function createScrubMaterial() {
 
 	const material = new MeshStandardNodeMaterial();
@@ -1217,12 +1399,31 @@ function createScrubMaterial() {
 	const deep = mix( color( 0x2a3a20 ), color( 0x3a4a28 ), shade );
 	const bright = mix( color( 0x5a6e38 ), color( 0x7a8448 ), shade );
 
+	// leaf clumps, gated by distance so the far hillside skips the noise
+	const clumpFade = smoothstep( 170, 25, positionWorld.distance( cameraPosition ) );
+	const clump = Fn( () => {
+
+		const c = float( 0 ).toVar();
+
+		If( clumpFade.greaterThan( 0.01 ), () => {
+
+			c.assign( valueNoise( positionWorld.mul( 1.4 ) )
+				.add( valueNoise( positionWorld.mul( 3.8 ) ).mul( 0.5 ) )
+				.mul( clumpFade ) );
+
+		} );
+
+		return c;
+
+	} )();
+
 	// cypress ( shade = 1 ) darkens toward its blue-green column
-	const lit = ao.mul( 0.55 ).add( 0.3 );
+	const lit = ao.mul( 0.55 ).add( 0.3 ).add( clump.mul( 0.3 ) );
 	let leaf = mix( deep, bright, lit );
 	leaf = mix( leaf, mix( color( 0x1f2e1c ), color( 0x2f4426 ), ao ), smoothstep( 0.96, 1.0, shade ) );
 
 	material.colorNode = leaf;
+	material.normalNode = bumpNormal( clump.mul( 0.35 ) );
 
 	return material;
 

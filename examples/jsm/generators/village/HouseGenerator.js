@@ -27,8 +27,8 @@ const _identity = /*@__PURE__*/ new Matrix4();
 
 // material-zone codes baked per vertex into the merged geometry, so one material can
 // branch on partId and shade every zone
-const PartId = { WALL: 0, TRIM: 1, SHUTTER: 2, ROOF: 3, GLASS: 4, DOOR: 5, STONE: 6, RAIL: 7 };
-const { WALL, TRIM, SHUTTER, ROOF, GLASS, DOOR, STONE, RAIL } = PartId;
+const PartId = { WALL: 0, TRIM: 1, SHUTTER: 2, ROOF: 3, GLASS: 4, DOOR: 5, STONE: 6, RAIL: 7, TERRACE: 8 };
+const { WALL, TRIM, SHUTTER, ROOF, GLASS, DOOR, STONE, RAIL, TERRACE } = PartId;
 
 // the flat painted band around every opening; the sills, cornices and fascias key
 // off it so all the facade trim reads as one consistent painted system
@@ -201,13 +201,14 @@ function metricUV( geometry, scaleU, scaleV ) {
  *
  * A house is a plastered shell: front and back walls are extruded with their
  * window and door openings punched through ( so every opening has real depth ),
- * the side walls carry the gable, and a low-pitched terracotta roof with
- * overhanging eaves caps it. Each opening is dressed with a painted surround,
- * a sill, recessed dark glazing and a pair of louvered shutters — folded open
- * against the wall or closed over the window — and some upper openings become
- * French doors behind small iron balconies. A stone podium below the ground
- * floor lets the house sit on sloping ground and reads as the retaining wall
- * of its terrace.
+ * the side walls carry the gable, and the top is capped per seed by a
+ * low-pitched terracotta gable roof, a flat cotto-tiled terrace behind a
+ * parapet, or a combination — a gable sharing the top with a railed balcony
+ * terrace. Each opening is dressed with a painted surround, a sill, recessed
+ * dark glazing and a pair of louvered shutters — folded open against the wall
+ * or closed over the window — and some upper openings become French doors
+ * behind small iron balconies. A stone podium below the ground floor lets the
+ * house sit on sloping ground and reads as the retaining wall of its terrace.
  *
  * Everything is baked — via {@link bakeGroups} — into a single non-indexed
  * BufferGeometry tagged with a per-vertex `partId` ({@link PartId}) plus the
@@ -242,8 +243,31 @@ class HouseGenerator {
 		const t = 0.24; // wall thickness — enough for the openings to read as real reveals
 
 		const eaves = p.floors * p.floorHeight + 0.15;
+
+		// the roof plan: a full gable, a flat terrace behind a parapet, or a
+		// gable sharing the top with a terrace ( the balcony half )
+
+		let gableSpan = null;
+		let terraceSpan = null;
+
+		if ( p.roofStyle === 'flat' ) {
+
+			terraceSpan = [ - w / 2, w / 2 ];
+
+		} else if ( p.roofStyle === 'combo' && w > 6.2 ) {
+
+			const split = p.terraceSide * ( w / 2 - w * p.terraceFraction );
+			gableSpan = p.terraceSide < 0 ? [ split, w / 2 ] : [ - w / 2, split ];
+			terraceSpan = p.terraceSide < 0 ? [ - w / 2, split ] : [ split, w / 2 ];
+
+		} else {
+
+			gableSpan = [ - w / 2, w / 2 ];
+
+		}
+
 		const rise = ( d / 2 ) * p.roofPitch;
-		const ridge = eaves + rise;
+		const ridge = eaves + ( gableSpan ? rise : 0 );
 
 		// one accumulator per kind of part: extruded walls in house space, plus
 		// instance matrices for every repeated box / plane module
@@ -253,8 +277,9 @@ class HouseGenerator {
 		const shutters = [];
 		const rails = [];
 		const stone = []; // podium and door steps
-		const roofBoxes = []; // ridge capping
-		const wallBoxes = []; // chimney stacks
+		const roofBoxes = []; // ridge capping and verge tiles
+		const terraceBoxes = []; // flat cotto terrace floors
+		const wallBoxes = []; // chimney stacks and parapets
 		const glass = []; // window panes ( unit planes )
 		const doors = [];
 
@@ -266,28 +291,31 @@ class HouseGenerator {
 		buildFacade( extras, modules, w, d, t, eaves, p, random, 0, true );
 		buildFacade( extras, modules, w, d, t, eaves, p, random, Math.PI, p.backOpenings );
 
-		// side walls carry the gable: a pentagon profile extruded to the wall
-		// thickness, inset so attached neighbours' walls never sit coplanar
+		// side walls carry the gable where a slope meets them: a pentagon profile
+		// extruded to the wall thickness, inset so attached neighbours' walls
+		// never sit coplanar; under a terrace the profile stays flat-topped
 
 		for ( const side of [ - 1, 1 ] ) {
 
 			const exposed = side === - 1 ? p.leftExposed : p.rightExposed;
-			buildGableWall( extras, modules, w, d, t, eaves, ridge, p, random, side, exposed );
+			const gabled = gableSpan !== null && ( side < 0 ? gableSpan[ 0 ] < - w / 2 + 0.01 : gableSpan[ 1 ] > w / 2 - 0.01 );
+			buildGableWall( extras, modules, w, d, t, eaves, ridge, p, random, side, exposed, gabled );
 
 		}
 
-		// the roof: two low-pitched tile planes with overhanging eaves, a ridge
-		// cap, fascia boards and an under-eave cornice line on the facades
+		// the roof: tiled slopes with overhanging eaves over the gabled span, a
+		// walkable terrace behind a parapet over the rest
 
-		buildRoof( extras, trim, roofBoxes, w, d, eaves, ridge, p );
+		if ( gableSpan ) buildRoof( extras, trim, roofBoxes, w, d, eaves, ridge, p, gableSpan );
+		if ( terraceSpan ) buildTerrace( wallBoxes, trim, rails, terraceBoxes, w, d, eaves, terraceSpan, p.roofStyle === 'combo' );
 
 		// chimneys: short plastered stacks with a cap slab, straddling the ridge
 
-		const chimneys = Math.floor( random() * 2.4 ); // 0..2, most houses have at least one
+		const chimneys = gableSpan && gableSpan[ 1 ] - gableSpan[ 0 ] > 2.4 ? Math.floor( random() * 2.4 ) : 0; // 0..2, most houses have at least one
 
 		for ( let i = 0; i < chimneys; i ++ ) {
 
-			const cx = ( random() - 0.5 ) * ( w - 1.6 );
+			const cx = gableSpan[ 0 ] + 0.8 + random() * ( gableSpan[ 1 ] - gableSpan[ 0 ] - 1.6 );
 			const cz = ( random() - 0.5 ) * 1.2;
 			const top = ridge + 0.4 + random() * 0.5;
 			const size = 0.4 + random() * 0.15;
@@ -320,6 +348,7 @@ class HouseGenerator {
 		if ( shutters.length > 0 ) groups.push( { geometry: _unitBox, matrices: shutters, partId: SHUTTER } );
 		if ( wallBoxes.length > 0 ) groups.push( { geometry: _unitBox, matrices: wallBoxes, partId: WALL } );
 		if ( roofBoxes.length > 0 ) groups.push( { geometry: _unitBox, matrices: roofBoxes, partId: ROOF } );
+		if ( terraceBoxes.length > 0 ) groups.push( { geometry: _unitBox, matrices: terraceBoxes, partId: TERRACE } );
 		if ( rails.length > 0 ) groups.push( { geometry: _unitBox, matrices: rails, partId: RAIL } );
 		if ( stone.length > 0 ) groups.push( { geometry: _unitBox, matrices: stone, partId: STONE } );
 		if ( doors.length > 0 ) groups.push( { geometry: nonIndexed( new PlaneGeometry( 1, 1 ) ), matrices: doors, partId: DOOR } );
@@ -372,11 +401,16 @@ HouseGenerator.defaults = {
 
 function randomStyle( random ) {
 
+	const roof = random();
+
 	return {
 		bayPitch: 1.75 + random() * 0.45,
 		openingWidth: 0.95 + random() * 0.18,
 		openingHeight: 1.38 + random() * 0.2,
-		roofPitch: 0.38 + random() * 0.14 // rise / run — the low gables of the coast
+		roofPitch: 0.38 + random() * 0.14, // rise / run — the low gables of the coast
+		roofStyle: roof < 0.55 ? 'gable' : ( roof < 0.75 ? 'flat' : 'combo' ), // the mixed roofscape of the coast
+		terraceFraction: 0.38 + random() * 0.22, // how much of a combo roof the terrace takes
+		terraceSide: random() < 0.5 ? - 1 : 1
 	};
 
 }
@@ -477,9 +511,10 @@ function buildFacade( extras, modules, w, d, t, eaves, p, random, rotationY, wit
 
 }
 
-// the pentagon profile of a side wall under the gable, extruded to the wall
-// thickness; an exposed ( row-end ) side takes one window per upper floor
-function buildGableWall( extras, modules, w, d, t, eaves, ridge, p, random, side, exposed ) {
+// the profile of a side wall, extruded to the wall thickness: a pentagon rising
+// to the ridge where it carries a gable, flat-topped under a terrace; an
+// exposed ( row-end ) side takes one window per upper floor
+function buildGableWall( extras, modules, w, d, t, eaves, ridge, p, random, side, exposed, gabled ) {
 
 	const halfD = d / 2 - 0.02;
 
@@ -487,7 +522,7 @@ function buildGableWall( extras, modules, w, d, t, eaves, ridge, p, random, side
 	shape.moveTo( - halfD, 0 );
 	shape.lineTo( halfD, 0 );
 	shape.lineTo( halfD, eaves );
-	shape.lineTo( 0, ridge );
+	if ( gabled ) shape.lineTo( 0, ridge );
 	shape.lineTo( - halfD, eaves );
 	shape.lineTo( - halfD, 0 );
 
@@ -560,10 +595,17 @@ function addOpening( modules, o, depth, p, random, rotationY ) {
 
 	if ( o.kind === 'door' ) {
 
-		// door leaf set deep in the reveal, with a stone threshold step below
+		// door leaf set deep in the reveal, with a short flight of threshold
+		// steps descending until they meet the ground, so the door stays
+		// reachable however the terrace falls away in front
 
 		doors.push( rotate( planeMatrix( o.cx, cy, face - 0.16, o.ow - 0.02, o.oh - 0.02 ) ) );
-		stone.push( rotate( boxMatrix( o.cx, - 0.06, face + 0.14, o.ow + 0.3, 0.24, 0.4 ) ) );
+
+		for ( let i = 0; i < 3; i ++ ) {
+
+			stone.push( rotate( boxMatrix( o.cx, - 0.08 - i * 0.16, face + 0.12 + i * 0.14, o.ow + 0.3 + i * 0.14, 0.16, 0.36 + i * 0.14 ) ) );
+
+		}
 
 		return;
 
@@ -641,18 +683,29 @@ function planeMatrix( x, y, z, sizeX, sizeY ) {
 
 // --- roof ------------------------------------------------------------------
 
-// two low-pitched tile planes with overhanging eaves, a ridge cap, fascia boards
-// under the eave edges and a cornice line on each facade
-function buildRoof( extras, trim, roofBoxes, w, d, eaves, ridge, p ) {
+// tiled slopes over the gabled span: two low-pitched planes with overhanging
+// eaves, verge tiles, a ridge cap, fascia boards and a cornice line on each
+// facade — and, where the span stops short of the house end, a gable-end wall
+// closing the roof against the terrace
+function buildRoof( extras, trim, roofBoxes, w, d, eaves, ridge, p, span ) {
 
-	const overhangSide = 0.18;
+	const [ x0, x1 ] = span;
+
+	// overhang past the house ends only; at an interior split the roof stays
+	// flush so the terrace parapet can meet it
+	const atLeft = x0 < - w / 2 + 0.01;
+	const atRight = x1 > w / 2 - 0.01;
+	const overhangL = atLeft ? 0.18 : 0.04;
+	const overhangR = atRight ? 0.18 : 0.04;
 	const overhangEave = 0.4;
+
+	const width = ( x1 - x0 ) + overhangL + overhangR;
+	const cx = ( x0 + x1 ) / 2 + ( overhangR - overhangL ) / 2;
 
 	const run = d / 2 + overhangEave;
 	const eaveY = eaves - overhangEave * p.roofPitch + 0.12; // the roof plane floats a beam's depth above the wall head
 	const ridgeY = ridge + 0.12;
 	const slopeLength = Math.hypot( run, ridgeY - eaveY );
-	const width = w + overhangSide * 2;
 
 	const angle = Math.atan2( run, ridgeY - eaveY );
 	const tilt = Math.atan2( ridgeY - eaveY, run ); // the slope's pitch off the horizontal
@@ -663,6 +716,7 @@ function buildRoof( extras, trim, roofBoxes, w, d, eaves, ridge, p ) {
 		slope.rotateX( - angle );
 		slope.translate( 0, ( ridgeY + eaveY ) / 2, run / 2 );
 		if ( side < 0 ) slope.rotateY( Math.PI );
+		slope.translate( cx, 0, 0 );
 		extras.push( slope );
 
 		// verge tiles along the gable edges, so the thin slope plane reads as a
@@ -674,19 +728,84 @@ function buildRoof( extras, trim, roofBoxes, w, d, eaves, ridge, p ) {
 			roofBoxes.push( new Matrix4()
 				.makeRotationX( lean )
 				.scale( _scale.set( 0.14, 0.12, slopeLength - 0.02 ) )
-				.setPosition( _position.set( sx * ( width / 2 - 0.06 ), ( ridgeY + eaveY ) / 2 + 0.02, side * run / 2 ) ) );
+				.setPosition( _position.set( cx + sx * ( width / 2 - 0.06 ), ( ridgeY + eaveY ) / 2 + 0.02, side * run / 2 ) ) );
 
 		}
 
 		// fascia board tucked under the eave edge, and the cornice line where
 		// the wall head meets the roof — the crisp white eaves of the coast
 
-		trim.push( boxMatrix( 0, eaveY - 0.09, side * ( d / 2 + overhangEave - 0.03 ), width, 0.15, 0.06 ) );
-		trim.push( boxMatrix( 0, eaves - 0.06, side * ( d / 2 + 0.05 ), w - 0.06, 0.13, 0.1 ) );
+		trim.push( boxMatrix( cx, eaveY - 0.09, side * ( d / 2 + overhangEave - 0.03 ), width, 0.15, 0.06 ) );
+		trim.push( boxMatrix( cx, eaves - 0.06, side * ( d / 2 + 0.05 ), x1 - x0 - 0.06, 0.13, 0.1 ) );
 
 	}
 
-	roofBoxes.push( boxMatrix( 0, ridgeY + 0.03, 0, width, 0.1, 0.34 ) );
+	roofBoxes.push( boxMatrix( cx, ridgeY + 0.03, 0, width, 0.1, 0.34 ) );
+
+	// the interior gable end: a triangle standing on the wall head, closing the
+	// slopes where they stop over the terrace; tucked just inside the gabled span
+	for ( const [ at, x, inset ] of [[ atLeft, x0, 0 ], [ atRight, x1, - 0.22 ]] ) {
+
+		if ( at ) continue;
+
+		const halfD = d / 2 - 0.02;
+		const shape = new Shape();
+		shape.moveTo( - halfD, eaves - 0.05 );
+		shape.lineTo( halfD, eaves - 0.05 );
+		shape.lineTo( 0, ridge );
+		shape.lineTo( - halfD, eaves - 0.05 );
+
+		const wall = new ExtrudeGeometry( shape, { depth: 0.22, bevelEnabled: false } );
+		wall.translate( 0, 0, x + inset );
+		wall.rotateY( Math.PI / 2 );
+		extras.push( wall );
+
+	}
+
+}
+
+// a walkable roof terrace over the flat span: a cotto tile floor behind a
+// plastered parapet — with a light iron rail on the balcony half of a combo
+// roof, where the terrace shares the top with a gable
+function buildTerrace( wallBoxes, trim, rails, terraceBoxes, w, d, eaves, span, balcony ) {
+
+	const [ x0, x1 ] = span;
+	const width = x1 - x0;
+	const cx = ( x0 + x1 ) / 2;
+
+	terraceBoxes.push( boxMatrix( cx, eaves - 0.02, 0, width - 0.04, 0.12, d - 0.1 ) );
+
+	const ph = balcony ? 0.5 : 0.85;
+
+	const parapets = [
+		[ cx, d / 2 - 0.09, width - 0.02, 0.16 ],
+		[ cx, - d / 2 + 0.09, width - 0.02, 0.16 ]
+	];
+
+	if ( x0 < - w / 2 + 0.01 ) parapets.push( [ x0 + 0.09, 0, 0.16, d - 0.36 ] );
+	if ( x1 > w / 2 - 0.01 ) parapets.push( [ x1 - 0.09, 0, 0.16, d - 0.36 ] );
+
+	for ( const [ px, pz, sx, sz ] of parapets ) {
+
+		wallBoxes.push( boxMatrix( px, eaves + ph / 2, pz, sx, ph, sz ) );
+		trim.push( boxMatrix( px, eaves + ph + 0.03, pz, sx + 0.06, 0.07, sz + 0.06 ) );
+
+	}
+
+	if ( balcony ) {
+
+		// the rail over the front parapet, so the terrace reads as the balcony
+		rails.push( boxMatrix( cx, eaves + ph + 0.45, d / 2 - 0.09, width - 0.08, 0.035, 0.035 ) );
+
+		const count = Math.max( 3, Math.round( width / 0.5 ) );
+
+		for ( let i = 0; i <= count; i ++ ) {
+
+			rails.push( boxMatrix( x0 + 0.06 + ( width - 0.12 ) * i / count, eaves + ph + 0.24, d / 2 - 0.09, 0.025, 0.42, 0.025 ) );
+
+		}
+
+	}
 
 }
 
@@ -730,6 +849,19 @@ const valueNoise = /*@__PURE__*/ Fn( ( [ p ] ) => {
 	return mix( mix( x00, x10, u.y ), mix( x01, x11, u.y ), u.z ).mul( 2 ).sub( 1 );
 
 } ).setLayout( { name: 'valueNoise', type: 'float', inputs: [ { name: 'p', type: 'vec3' } ] } );
+
+// antialiased repeated line at every multiple of `period` ( tile joints and
+// courses ): the drawn line never falls below the pixel footprint, so the
+// pattern stays legible into the distance and dissolves instead of shimmering
+function gridLine( coord, period, halfWidth ) {
+
+	const g = coord.div( period );
+	const d = float( 0.5 ).sub( fract( g ).sub( 0.5 ).abs() ); // distance to nearest line, in periods
+	const aa = fwidth( g ).max( 0.0001 );
+	const hw = halfWidth / period;
+	return smoothstep( float( hw ).add( aa ), float( hw ).sub( aa ), d ).mul( float( hw ).div( fwidth( g ).max( hw ) ).min( 1 ) );
+
+}
 
 // fractal ( fBm ) of valueNoise; unrolled for a compile-time octave count
 const valueFractal = ( p, octaves ) => {
@@ -825,24 +957,45 @@ function createHouseMaterial() {
 	const louver = fract( positionWorld.y.div( 0.05 ) ).mul( louverDetail );
 	const shutterShade = shutterColor.mul( louver.mul( 0.35 ).add( 0.78 ) ).mul( float( 1 ).add( tone ) );
 
-	// terracotta barrel tiles: courses down the slope, staggered barrels across it,
-	// each tile hashed to its own fired tone. UVs are metric ( baked in metres ).
-	const tileU = uv().x.div( 0.19 );
-	const tileV = uv().y.div( 0.42 );
-	const course = floor( tileV );
-	const barrelCoord = tileU.add( course.mul( 0.5 ) ); // half-tile stagger per course
+	// per-house roof family: terracotta for most, weathered brown or faded red
+	// for the rest — and the red family skips the red-painted houses, so a roof
+	// never matches its own walls
+	const roofPick = houseHash( 53 );
+	let roofBase = mix( color( 0x9d5231 ), color( 0xbb6c41 ), houseHash( 59 ) );
+	roofBase = select( roofPick.greaterThan( 0.78 ), mix( color( 0x7c4933 ), color( 0x94593d ), houseHash( 59 ) ), roofBase );
+	roofBase = select( roofPick.greaterThan( 0.92 ).and( paint.greaterThan( 1.5 ) ), mix( color( 0x8e4036 ), color( 0xa54c3e ), houseHash( 59 ) ), roofBase );
+
+	// slope tiles: staggered terracotta barrels in metric UVs. the course and gap
+	// joints are antialiased lines, so the tiling stays legible into the distance
+	// instead of washing flat; only the per-tile jitter fades, so it can't sparkle.
+	const course = floor( uv().y.div( 0.42 ) );
+	const barrelCoord = uv().x.div( 0.19 ).add( course.mul( 0.5 ) ); // half-tile stagger per course
 	const barrel = fract( barrelCoord ).sub( 0.5 ).abs().mul( 2 ).oneMinus(); // 1 on a barrel's crest, 0 in the pan
 	const tileKey = uint( floor( barrelCoord ).add( 1 << 16 ) ).mul( uint( 73856093 ) ).bitXor( uint( course.add( 1 << 16 ) ).mul( uint( 19349663 ) ) );
-	const tileRnd = ihash( tileKey );
 
-	let tile = mix( color( 0x94492a ), color( 0xbc6d42 ), tileRnd );
-	tile = mix( tile, color( 0x743d28 ), step( 0.86, ihash( tileKey.add( uint( 1 ) ) ) ).mul( 0.75 ) ); // the odd near-brown tile
-	tile = mix( tile, color( 0x9c8a5e ), smoothstep( 0.55, 0.85, valueNoise( positionWorld.mul( 0.4 ) ) ).mul( 0.45 ) ); // lichen blooming over older slopes
+	const tileFade = smoothstep( 0.5, 0.08, texel );
+	const barrelFade = smoothstep( 0.3, 0.06, texel );
 
-	const tileDetail = smoothstep( 0.34, 0.05, texel );
-	const overlapShadow = smoothstep( 0.28, 0.0, fract( tileV ) ).mul( 0.34 ).mul( tileDetail ); // each course shades the one below
-	const barrelShade = barrel.mul( 0.3 ).sub( 0.15 ).mul( tileDetail );
-	const roofColor = tile.mul( float( 1 ).add( barrelShade ).sub( overlapShadow ) ).mul( float( 1 ).add( tone ) );
+	let tile = roofBase.mul( ihash( tileKey ).sub( 0.5 ).mul( 0.26 ).mul( tileFade ).add( 1 ) );
+	tile = mix( tile, color( 0x9c8a5e ), smoothstep( 0.55, 0.85, valueNoise( positionWorld.mul( 0.4 ) ) ).mul( 0.4 ) ); // lichen blooming over older slopes
+
+	const courseJoint = gridLine( uv().y, 0.42, 0.05 );
+	const barrelJoint = gridLine( barrelCoord, 1, 0.07 );
+	const barrelShade = barrel.mul( 0.3 ).sub( 0.15 ).mul( barrelFade );
+	const roofColor = tile
+		.mul( float( 1 ).add( barrelShade ) )
+		.mul( courseJoint.mul( 0.3 ).oneMinus() )
+		.mul( barrelJoint.mul( 0.26 ).oneMinus() )
+		.mul( float( 1 ).add( tone ) );
+
+	// terrace floors: square cotto tiles laid in house-local metres — always the
+	// fired orange of the kiln, whatever colour the walls below are washed
+	const cottoJoint = gridLine( positionLocal.x, 0.34, 0.014 ).max( gridLine( positionLocal.z, 0.34, 0.014 ) );
+	const cottoCell = uint( floor( positionLocal.x.div( 0.34 ) ).add( 1 << 16 ) ).mul( uint( 73856093 ) ).bitXor( uint( floor( positionLocal.z.div( 0.34 ) ).add( 1 << 16 ) ).mul( uint( 19349663 ) ) );
+	const cottoColor = mix( color( 0xa8603a ), color( 0xc07a4e ), houseHash( 71 ) )
+		.mul( ihash( cottoCell ).sub( 0.5 ).mul( 0.16 ).mul( tileFade ).add( 1 ) )
+		.mul( cottoJoint.mul( 0.3 ).oneMinus() )
+		.mul( float( 1 ).add( tone ) );
 
 	// glazing: near-black glass with a per-pane tint, the sky reflection does the rest
 	const pane = valueNoise( positionWorld.mul( 1.1 ) ).mul( 0.5 ).add( 0.5 );
@@ -874,28 +1027,31 @@ function createHouseMaterial() {
 	const isDoor = partId.equal( DOOR );
 	const isStone = partId.equal( STONE );
 	const isRail = partId.equal( RAIL );
+	const isTerrace = partId.equal( TERRACE );
 
 	const material = new MeshStandardNodeMaterial();
 
 	material.colorNode = select( isTrim, trimColor,
 		select( isShutter, shutterShade,
 			select( isRoof, roofColor,
-				select( isGlass, glassColor,
-					select( isDoor, doorColor,
-						select( isStone, stoneColor,
-							select( isRail, railColor, plaster ) ) ) ) ) ) );
+				select( isTerrace, cottoColor,
+					select( isGlass, glassColor,
+						select( isDoor, doorColor,
+							select( isStone, stoneColor,
+								select( isRail, railColor, plaster ) ) ) ) ) ) ) );
 
-	material.roughnessNode = select( isGlass, float( 0.14 ), select( isRail, float( 0.5 ), float( 0.95 ) ) );
+	material.roughnessNode = select( isGlass, float( 0.14 ), select( isRail, float( 0.5 ), select( isTerrace, float( 0.85 ), float( 0.95 ) ) ) );
 	material.metalnessNode = select( isRail, float( 0.55 ), float( 0 ) );
 
-	// relief: barrel-tile ridges on the roofs, a soft plaster / stone grain elsewhere;
-	// glass and painted trim stay smooth
+	// relief: barrel-tile ridges on the roofs, recessed joints on the terrace
+	// cotto, a soft plaster / stone grain elsewhere; glass and trim stay smooth
 	const grain = valueNoise( positionWorld.mul( 2.2 ) ).mul( select( isStone, float( 0.012 ), float( 0.004 ) ) );
-	const roofRelief = barrel.mul( 0.012 ).sub( overlapShadow.mul( 0.02 ) ).mul( tileDetail );
-	material.normalNode = bumpNormal( select( isRoof, roofRelief, select( isGlass.or( isTrim ), float( 0 ), grain ) ) );
+	const roofRelief = barrel.mul( 0.014 ).mul( barrelFade ).sub( courseJoint.mul( 0.018 ) );
+	const cottoRelief = cottoJoint.mul( - 0.006 );
+	material.normalNode = bumpNormal( select( isRoof, roofRelief, select( isTerrace, cottoRelief, select( isGlass.or( isTrim ), float( 0 ), grain ) ) ) );
 
 	return material;
 
 }
 
-export { HouseGenerator, createHouseMaterial, housePalette, bakeGroups, boxMatrix, metricUV, valueNoise, valueFractal, PartId };
+export { HouseGenerator, createHouseMaterial, housePalette, bakeGroups, boxMatrix, metricUV, gridLine, valueNoise, valueFractal, PartId };
