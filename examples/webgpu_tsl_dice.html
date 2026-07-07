@@ -239,7 +239,7 @@
 
 				scenePass.setMRT( mrtNode );
 
-				const bloomPass = bloom( scenePass.getTextureNode( 'emissive' ), 0.5, 0.4 );
+				const bloomPass = bloom( scenePass.getTextureNode( 'emissive' ), 0.45, 0.25 );
 
 				postProcessing = new THREE.RenderPipeline( renderer );
 				postProcessing.outputNode = scenePass.getTextureNode().add( bloomPass );
@@ -299,8 +299,6 @@
 				} );
 
 				window.addEventListener( 'resize', onWindowResize );
-
-				window.__example = { camera, controls, dice, focus }; // debug
 
 			}
 
@@ -884,13 +882,13 @@
 
 					const drift = time.mul( 0.18 ).add( phase );
 					const flow = fbm( vec3( p.x.mul( 1.7 ), p.y.mul( 2.6 ), p.z.mul( 1.7 ) ).add( vec3( drift, drift.mul( 0.55 ), drift.negate().mul( 0.4 ) ) ) );
-					const curtain = sin( p.y.mul( 2.6 ).add( flow.mul( 3.4 ) ).add( time.mul( 0.5 ) ) ).mul( 0.5 ).add( 0.5 ).pow( 1.8 );
+					const curtain = sin( p.dot( vec3( 2.8, 6.2, 3.6 ) ).add( flow.mul( 4.2 ) ).add( time.mul( 0.5 ) ) ).mul( 0.5 ).add( 0.5 ).pow( 1.6 );
 					const shift = sin( flow.mul( 2.2 ).add( time.mul( 0.27 ) ) ).mul( 0.5 ).add( 0.5 );
 
 					let auroraColor = mix( color( 0x2ee88a ), color( 0x35b9e6 ), shift );
 					auroraColor = mix( auroraColor, color( 0x5f6cf0 ), curtain.mul( shift ).mul( 0.45 ) );
 
-					const glow = auroraColor.mul( curtain.mul( fresnel( 1.8 ).mul( 0.7 ).add( 0.3 ) ).mul( 1.35 ) );
+					const glow = auroraColor.mul( curtain.mul( fresnel( 1.8 ).mul( 0.6 ).add( 0.35 ) ).mul( 1.35 ) );
 
 					surf.emissive = surf.emissive === null ? glow : surf.emissive.add( glow );
 					surf.sheen = auroraColor.mul( 0.5 );
