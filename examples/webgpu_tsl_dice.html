@@ -1,0 +1,1148 @@
+<!DOCTYPE html>
+<html lang="en">
+	<head>
+		<title>three.js webgpu - tsl - dice</title>
+		<meta charset="utf-8">
+		<meta name="viewport" content="width=device-width, user-scalable=no, minimum-scale=1.0, maximum-scale=1.0">
+		<meta property="og:title" content="three.js webgpu - tsl - dice">
+		<meta property="og:type" content="website">
+		<meta property="og:url" content="https://threejs.org/examples/webgpu_tsl_dice.html">
+		<meta property="og:image" content="https://threejs.org/examples/screenshots/webgpu_tsl_dice.jpg">
+		<link type="text/css" rel="stylesheet" href="example.css">
+	</head>
+	<body>
+
+		<div id="info">
+			<a href="https://threejs.org/" target="_blank" rel="noopener" class="logo-link"></a>
+
+			<div class="title-wrapper">
+				<a href="https://threejs.org/" target="_blank" rel="noopener">three.js</a><span>Procedural Dice</span>
+			</div>
+
+			<small>
+				Roguelike dice with gemstone suits, materials and finishes, authored in TSL — click a die to inspect it.
+			</small>
+		</div>
+
+		<script type="importmap">
+			{
+				"imports": {
+					"three": "../build/three.webgpu.js",
+					"three/webgpu": "../build/three.webgpu.js",
+					"three/tsl": "../build/three.tsl.js",
+					"three/addons/": "./jsm/"
+				}
+			}
+		</script>
+
+		<script type="module">
+
+			import * as THREE from 'three/webgpu';
+			import { Fn, attribute, cameraPosition, color, cos, dFdx, dFdy, emissive, faceDirection, float, hue, max, min, mix, mrt, mx_fractal_noise_float, mx_noise_float, mx_worley_noise_float, normalView, normalWorld, output, pass, pmremTexture, positionLocal, positionView, positionWorld, reflector, refract, screenUV, sin, smoothstep, time, vec2, vec3, vec4 } from 'three/tsl';
+
+			import { Inspector } from 'three/addons/inspector/Inspector.js';
+
+			import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+			import { HDRLoader } from 'three/addons/loaders/HDRLoader.js';
+			import { FontLoader } from 'three/addons/loaders/FontLoader.js';
+			import { TextGeometry } from 'three/addons/geometries/TextGeometry.js';
+			import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
+			import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+			import { bloom } from 'three/addons/tsl/display/BloomNode.js';
+
+			// die shape
+
+			const BEVEL = 0.07;
+			const DISH_RADIUS = 0.1;
+			const DISH_DEPTH = 0.05;
+			const GEM_RADIUS = 0.11;
+			const GEM_FLUSH = 0.002;
+			const PIP_OFFSET = 0.225;
+
+			// standard western die - opposite faces sum to seven
+
+			const FACES = [
+				{ value: 6, n: [ 1, 0, 0 ], t: [ 0, 0, - 1 ], b: [ 0, 1, 0 ] },
+				{ value: 1, n: [ - 1, 0, 0 ], t: [ 0, 0, 1 ], b: [ 0, 1, 0 ] },
+				{ value: 5, n: [ 0, 1, 0 ], t: [ 1, 0, 0 ], b: [ 0, 0, - 1 ] },
+				{ value: 2, n: [ 0, - 1, 0 ], t: [ 1, 0, 0 ], b: [ 0, 0, 1 ] },
+				{ value: 3, n: [ 0, 0, 1 ], t: [ 1, 0, 0 ], b: [ 0, 1, 0 ] },
+				{ value: 4, n: [ 0, 0, - 1 ], t: [ - 1, 0, 0 ], b: [ 0, 1, 0 ] }
+			];
+
+			const PIP_LAYOUTS = {
+				1: [[ 0, 0 ]],
+				2: [[ - 1, - 1 ], [ 1, 1 ]],
+				3: [[ - 1, - 1 ], [ 0, 0 ], [ 1, 1 ]],
+				4: [[ - 1, - 1 ], [ - 1, 1 ], [ 1, - 1 ], [ 1, 1 ]],
+				5: [[ - 1, - 1 ], [ - 1, 1 ], [ 0, 0 ], [ 1, - 1 ], [ 1, 1 ]],
+				6: [[ - 1, - 1 ], [ - 1, 0 ], [ - 1, 1 ], [ 1, - 1 ], [ 1, 0 ], [ 1, 1 ]]
+			};
+
+			// gemstone suits
+
+			const SUITS = {
+				emerald: { core: 0x0fae5e, deep: 0x03421f, glow: 0x36e392, neon: 0x2bff9e, ior: 1.58 },
+				ruby: { core: 0xd91c44, deep: 0x4a0512, glow: 0xff5a6e, neon: 0xff4a5f, ior: 1.77 },
+				sapphire: { core: 0x2450d9, deep: 0x081249, glow: 0x4e79ff, neon: 0x3f7dff, ior: 1.77 },
+				amethyst: { core: 0x8f46d9, deep: 0x2e0b57, glow: 0xbe7dff, neon: 0xb95cff, ior: 1.55 }
+			};
+
+			// the collection sheet - one entry per die
+
+			const ROWS = [
+				[
+					{ name: 'Emerald', suit: 'emerald' },
+					{ name: 'Ruby', suit: 'ruby' },
+					{ name: 'Sapphire', suit: 'sapphire' },
+					{ name: 'Amethyst', suit: 'amethyst' }
+				],
+				[
+					{ name: 'Chalk', material: 'chalk' },
+					{ name: 'Ivory', material: 'ivory' },
+					{ name: 'Crystal', material: 'crystal' },
+					{ name: 'Obsidian', material: 'obsidian' },
+					{ name: 'Lead', material: 'lead' }
+				],
+				[
+					{ name: 'Gilded', material: 'gilded' },
+					{ name: 'Loaded', material: 'loaded' },
+					{ name: 'Prism', material: 'prism' },
+					{ name: 'Etched', finish: 'etched' },
+					{ name: 'Neon', finish: 'neon' }
+				],
+				[
+					{ name: 'Aurora', finish: 'aurora' },
+					{ name: 'Obsidian Neon', material: 'obsidian', finish: 'neon' },
+					{ name: 'Crystal Etched', material: 'crystal', finish: 'etched' },
+					{ name: 'Gilded Aurora', material: 'gilded', finish: 'aurora' },
+					{ name: 'Ivory Neon', material: 'ivory', finish: 'neon' }
+				],
+				[
+					{ name: 'Chalk Etched', material: 'chalk', finish: 'etched' },
+					{ name: 'Loaded Aurora', material: 'loaded', finish: 'aurora' },
+					{ name: 'Prism Neon', material: 'prism', finish: 'neon' },
+					{ name: 'Obsidian Etched', material: 'obsidian', finish: 'etched' },
+					{ name: 'Crystal Aurora', material: 'crystal', finish: 'aurora' }
+				]
+			];
+
+			let camera, scene, renderer, controls, postProcessing;
+
+			let envMap;
+
+			const dice = [];
+			const focus = { current: null, anchor: new THREE.Vector3(), target: new THREE.Vector3( 0, 0.3, 0.6 ) };
+			const timer = new THREE.Timer();
+
+			init();
+
+			async function init() {
+
+				camera = new THREE.PerspectiveCamera( 38, window.innerWidth / window.innerHeight, 0.1, 100 );
+				camera.position.set( 0, 12.4, 12.4 );
+
+				scene = new THREE.Scene();
+				scene.backgroundNode = mix( color( 0x16171d ), color( 0x050507 ), smoothstep( 0.0, 1.0, screenUV.sub( vec2( 0.5, 0.55 ) ).length().mul( 1.6 ) ) );
+
+				// environment - studio softboxes suit gold, glass and gems
+
+				envMap = await new HDRLoader().setPath( 'textures/equirectangular/' ).loadAsync( 'monochrome_studio_02_1k.hdr' );
+				envMap.mapping = THREE.EquirectangularReflectionMapping;
+
+				scene.environment = envMap;
+				scene.environmentIntensity = 1.1;
+
+				// lights
+
+				const keyLight = new THREE.DirectionalLight( 0xffffff, 1.6 );
+				keyLight.position.set( 4.5, 8, 3.5 );
+				keyLight.castShadow = true;
+				keyLight.shadow.mapSize.set( 2048, 2048 );
+				keyLight.shadow.camera.near = 1;
+				keyLight.shadow.camera.far = 25;
+				keyLight.shadow.camera.top = 7;
+				keyLight.shadow.camera.right = 7;
+				keyLight.shadow.camera.bottom = - 7;
+				keyLight.shadow.camera.left = - 7;
+				keyLight.shadow.normalBias = 0.03;
+				scene.add( keyLight );
+
+				const rimLight = new THREE.DirectionalLight( 0x8fb7ff, 0.5 );
+				rimLight.position.set( - 6, 3, - 5 );
+				scene.add( rimLight );
+
+				// display slab and dice
+
+				createSlab();
+
+				const bodyGeometry = createDieBodyGeometry( true );
+				const blankGeometry = createDieBodyGeometry( false );
+				const pipsGeometry = createPipsGeometry();
+				const pluggedPipsGeometry = createPipsGeometry( [ 1 ] );
+
+				const geometries = { bodyGeometry, blankGeometry, pipsGeometry, pluggedPipsGeometry };
+
+				const font = await new FontLoader().loadAsync( 'fonts/helvetiker_regular.typeface.json' );
+
+				let index = 0;
+
+				for ( let row = 0; row < ROWS.length; row ++ ) {
+
+					const defs = ROWS[ row ];
+
+					for ( let col = 0; col < defs.length; col ++ ) {
+
+						const def = defs[ col ];
+						const home = new THREE.Vector3( ( col - ( defs.length - 1 ) / 2 ) * 1.55, 0.5, ( row - ( ROWS.length - 1 ) / 2 ) * 1.9 );
+
+						createDie( def, home, index ++, geometries );
+						createLabel( def.name, font, home );
+
+					}
+
+				}
+
+				// renderer
+
+				renderer = new THREE.WebGPURenderer( { antialias: true } );
+				renderer.setPixelRatio( window.devicePixelRatio );
+				renderer.setSize( window.innerWidth, window.innerHeight );
+				renderer.toneMapping = THREE.ACESFilmicToneMapping;
+				renderer.toneMappingExposure = 1.1;
+				renderer.shadowMap.enabled = true;
+				renderer.setAnimationLoop( animate );
+				document.body.appendChild( renderer.domElement );
+
+				renderer.inspector = new Inspector();
+				document.body.appendChild( renderer.inspector.domElement );
+
+				// controls
+
+				controls = new OrbitControls( camera, renderer.domElement );
+				controls.target.copy( focus.target );
+				controls.enableDamping = true;
+				controls.maxPolarAngle = Math.PI * 0.49;
+				controls.minDistance = 2;
+				controls.maxDistance = 30;
+
+				// selective bloom from the emissive channel
+
+				const scenePass = pass( scene, camera );
+
+				const mrtNode = mrt( {
+					output: output,
+					emissive: vec4( emissive, output.a )
+				} );
+
+				mrtNode.setBlendMode( 'emissive', new THREE.BlendMode( THREE.NormalBlending ) );
+
+				scenePass.setMRT( mrtNode );
+
+				const bloomPass = bloom( scenePass.getTextureNode( 'emissive' ), 0.5, 0.4 );
+
+				postProcessing = new THREE.RenderPipeline( renderer );
+				postProcessing.outputNode = scenePass.getTextureNode().add( bloomPass );
+
+				// debug
+
+				const gui = renderer.inspector.createParameters( 'Parameters' );
+				gui.add( scene, 'environmentIntensity', 0, 3, 0.01 );
+				gui.add( renderer, 'toneMappingExposure', 0, 2, 0.01 ).name( 'exposure' );
+				gui.add( bloomPass.strength, 'value', 0, 2, 0.01 ).name( 'bloomStrength' );
+				gui.add( bloomPass.radius, 'value', 0, 1, 0.01 ).name( 'bloomRadius' );
+
+				// events
+
+				const pointer = new THREE.Vector2();
+				const pointerDown = new THREE.Vector2();
+				const raycaster = new THREE.Raycaster();
+
+				const pick = ( event ) => {
+
+					pointer.set( ( event.clientX / window.innerWidth ) * 2 - 1, - ( event.clientY / window.innerHeight ) * 2 + 1 );
+					raycaster.setFromCamera( pointer, camera );
+
+					const intersects = raycaster.intersectObjects( dice.map( ( die ) => die.proxy ) );
+					return intersects.length > 0 ? intersects[ 0 ].object.userData.die : null;
+
+				};
+
+				renderer.domElement.addEventListener( 'pointerdown', ( event ) => pointerDown.set( event.clientX, event.clientY ) );
+
+				renderer.domElement.addEventListener( 'pointerup', ( event ) => {
+
+					if ( pointerDown.distanceTo( new THREE.Vector2( event.clientX, event.clientY ) ) > 6 ) return;
+
+					const die = pick( event );
+
+					if ( die !== null && die !== focus.current ) {
+
+						// bring the die to an inspection point in front of the camera
+
+						focus.current = die;
+						focus.anchor.copy( camera.position ).addScaledVector( camera.getWorldDirection( new THREE.Vector3() ), 3.4 );
+						focus.anchor.y = Math.max( focus.anchor.y, 1.1 );
+
+					} else {
+
+						focus.current = null;
+
+					}
+
+				} );
+
+				renderer.domElement.addEventListener( 'pointermove', ( event ) => {
+
+					renderer.domElement.style.cursor = pick( event ) ? 'pointer' : 'default';
+
+				} );
+
+				window.addEventListener( 'resize', onWindowResize );
+
+				window.__example = { camera, controls, dice, focus }; // debug
+
+			}
+
+			//
+
+			function onWindowResize() {
+
+				camera.aspect = window.innerWidth / window.innerHeight;
+				camera.updateProjectionMatrix();
+
+				renderer.setSize( window.innerWidth, window.innerHeight );
+
+			}
+
+			function animate() {
+
+				timer.update();
+
+				const delta = Math.min( timer.getDelta(), 0.1 );
+
+				for ( const die of dice ) {
+
+					const focused = die === focus.current;
+					const target = focused ? focus.anchor : die.home;
+					const scale = focused ? 1.3 : ( focus.current !== null ? 0.96 : 1 );
+
+					die.root.position.x = THREE.MathUtils.damp( die.root.position.x, target.x, 5, delta );
+					die.root.position.y = THREE.MathUtils.damp( die.root.position.y, target.y, 5, delta );
+					die.root.position.z = THREE.MathUtils.damp( die.root.position.z, target.z, 5, delta );
+					die.root.scale.setScalar( THREE.MathUtils.damp( die.root.scale.x, scale, 5, delta ) );
+
+					if ( focused ) {
+
+						die.root.rotation.y += delta * 0.45;
+
+					} else {
+
+						// settle back onto the nearest axis-aligned orientation
+
+						const rest = Math.round( die.root.rotation.y / ( Math.PI * 0.5 ) ) * Math.PI * 0.5;
+						die.root.rotation.y = THREE.MathUtils.damp( die.root.rotation.y, rest, 5, delta );
+
+					}
+
+				}
+
+				const lookAt = focus.current !== null ? focus.current.root.position : focus.target;
+				controls.target.x = THREE.MathUtils.damp( controls.target.x, lookAt.x, 5, delta );
+				controls.target.y = THREE.MathUtils.damp( controls.target.y, lookAt.y, 5, delta );
+				controls.target.z = THREE.MathUtils.damp( controls.target.z, lookAt.z, 5, delta );
+
+				controls.update();
+
+				postProcessing.render();
+
+			}
+
+			// geometry ---------------------------------------------------------------
+			//
+			// each face is a displaced grid - the outer band wraps the bevel, the flat
+			// interior is dented by a smooth dish for every pip, so the gems read as
+			// embedded in the body rather than painted on. normals are analytic.
+
+			function gridLine( bevelSegments, faceSegments ) {
+
+				const line = [];
+
+				for ( let i = 0; i <= bevelSegments; i ++ ) line.push( ( i / bevelSegments ) * BEVEL );
+				for ( let i = 1; i <= faceSegments; i ++ ) line.push( BEVEL + ( i / faceSegments ) * ( 1 - 2 * BEVEL ) );
+				for ( let i = 1; i <= bevelSegments; i ++ ) line.push( 1 - BEVEL + ( i / bevelSegments ) * BEVEL );
+
+				return line;
+
+			}
+
+			function dishProfile( t ) {
+
+				// flat bottom with smoothly easing walls, zero slope at the rim
+
+				const x = Math.min( 1, ( 1 - t ) / 0.45 );
+				return x * x * ( 3 - 2 * x );
+
+			}
+
+			function createDieBodyGeometry( withPips ) {
+
+				const line = gridLine( 12, 64 );
+				const count = line.length;
+				const inner = 0.5 - BEVEL;
+
+				const positions = [];
+				const normals = [];
+				const pipAos = [];
+				const indices = [];
+
+				for ( const face of FACES ) {
+
+					const [ nx, ny, nz ] = face.n;
+					const [ tx, ty, tz ] = face.t;
+					const [ bx, by, bz ] = face.b;
+
+					const pips = withPips ? PIP_LAYOUTS[ face.value ] : [];
+					const offset = positions.length / 3;
+
+					for ( let iy = 0; iy < count; iy ++ ) {
+
+						for ( let ix = 0; ix < count; ix ++ ) {
+
+							const u = line[ ix ] - 0.5;
+							const v = line[ iy ] - 0.5;
+
+							let px = nx * 0.5 + tx * u + bx * v;
+							let py = ny * 0.5 + ty * u + by * v;
+							let pz = nz * 0.5 + tz * u + bz * v;
+
+							// rounded box projection
+
+							const qx = Math.max( - inner, Math.min( inner, px ) );
+							const qy = Math.max( - inner, Math.min( inner, py ) );
+							const qz = Math.max( - inner, Math.min( inner, pz ) );
+
+							const dl = Math.hypot( px - qx, py - qy, pz - qz );
+
+							let nrx = ( px - qx ) / dl;
+							let nry = ( py - qy ) / dl;
+							let nrz = ( pz - qz ) / dl;
+
+							px = qx + nrx * BEVEL;
+							py = qy + nry * BEVEL;
+							pz = qz + nrz * BEVEL;
+
+							// pip dishes
+
+							let ao = 0;
+
+							for ( const [ cx, cy ] of pips ) {
+
+								const du = u - cx * PIP_OFFSET;
+								const dv = v - cy * PIP_OFFSET;
+								const r = Math.hypot( du, dv );
+								const t = r / DISH_RADIUS;
+
+								if ( t >= 1 ) continue;
+
+								const profile = dishProfile( t );
+
+								px -= nx * DISH_DEPTH * profile;
+								py -= ny * DISH_DEPTH * profile;
+								pz -= nz * DISH_DEPTH * profile;
+
+								if ( t > 0.55 ) {
+
+									const x = ( 1 - t ) / 0.45;
+									const slope = - 6 * x * ( 1 - x ) / ( 0.45 * DISH_RADIUS ) * DISH_DEPTH;
+									const hu = slope * du / r;
+									const hv = slope * dv / r;
+
+									nrx = nx + tx * hu + bx * hv;
+									nry = ny + ty * hu + by * hv;
+									nrz = nz + tz * hu + bz * hv;
+
+									const nl = Math.hypot( nrx, nry, nrz );
+									nrx /= nl; nry /= nl; nrz /= nl;
+
+								}
+
+								ao = Math.max( ao, profile );
+
+							}
+
+							positions.push( px, py, pz );
+							normals.push( nrx, nry, nrz );
+							pipAos.push( ao );
+
+						}
+
+					}
+
+					for ( let iy = 0; iy < count - 1; iy ++ ) {
+
+						for ( let ix = 0; ix < count - 1; ix ++ ) {
+
+							const a = offset + iy * count + ix;
+							const b = a + 1;
+							const c = a + count + 1;
+							const d = a + count;
+
+							indices.push( a, b, c, a, c, d );
+
+						}
+
+					}
+
+				}
+
+				const geometry = new THREE.BufferGeometry();
+				geometry.setIndex( indices );
+				geometry.setAttribute( 'position', new THREE.Float32BufferAttribute( positions, 3 ) );
+				geometry.setAttribute( 'normal', new THREE.Float32BufferAttribute( normals, 3 ) );
+				geometry.setAttribute( 'pipAo', new THREE.Float32BufferAttribute( pipAos, 1 ) );
+
+				return geometry;
+
+			}
+
+			// the pips are wide gem cabochons seated below the face, their rims buried
+			// under the dish walls so each stone appears socketed into the body
+
+			function createPipsGeometry( excludeValues = [] ) {
+
+				const caps = [];
+				let pipIndex = 0;
+
+				for ( const face of FACES ) {
+
+					if ( excludeValues.includes( face.value ) ) continue;
+
+					const [ nx, ny, nz ] = face.n;
+					const [ tx, ty, tz ] = face.t;
+					const [ bx, by, bz ] = face.b;
+
+					const orientation = new THREE.Quaternion().setFromUnitVectors( new THREE.Vector3( 0, 1, 0 ), new THREE.Vector3( nx, ny, nz ) );
+
+					for ( const [ cx, cy ] of PIP_LAYOUTS[ face.value ] ) {
+
+						const u = cx * PIP_OFFSET;
+						const v = cy * PIP_OFFSET;
+
+						const center = new THREE.Vector3(
+							nx * ( 0.5 - GEM_FLUSH - GEM_RADIUS ) + tx * u + bx * v,
+							ny * ( 0.5 - GEM_FLUSH - GEM_RADIUS ) + ty * u + by * v,
+							nz * ( 0.5 - GEM_FLUSH - GEM_RADIUS ) + tz * u + bz * v
+						);
+
+						const cap = new THREE.SphereGeometry( GEM_RADIUS, 28, 18, 0, Math.PI * 2, 0, 1.05 );
+						cap.applyQuaternion( orientation );
+						cap.translate( center.x, center.y, center.z );
+
+						const vertexCount = cap.attributes.position.count;
+						const centers = new Float32Array( vertexCount * 3 );
+						const seeds = new Float32Array( vertexCount );
+						const seed = ( ( pipIndex ++ ) * 0.618034 ) % 1;
+
+						for ( let i = 0; i < vertexCount; i ++ ) {
+
+							centers.set( [ center.x, center.y, center.z ], i * 3 );
+							seeds[ i ] = seed;
+
+						}
+
+						cap.setAttribute( 'gemCenter', new THREE.BufferAttribute( centers, 3 ) );
+						cap.setAttribute( 'gemSeed', new THREE.BufferAttribute( seeds, 1 ) );
+
+						caps.push( cap );
+
+					}
+
+				}
+
+				return mergeGeometries( caps );
+
+			}
+
+			// tsl helpers ------------------------------------------------------------
+
+			function fbm( position, octaves = 3 ) {
+
+				return mx_fractal_noise_float( position, octaves, 2, 0.5 );
+
+			}
+
+			// 1 on the rounded edges and corners, 0 on the flat faces
+
+			function bevelMask() {
+
+				const e = positionLocal.abs().sub( 0.5 - BEVEL ).div( BEVEL ).clamp();
+				return e.x.mul( e.y ).add( e.y.mul( e.z ) ).add( e.z.mul( e.x ) ).clamp();
+
+			}
+
+			// distance to the face border, measured in the plane of whichever face
+			// the point lies on
+
+			function faceEdgeDist( p ) {
+
+				const e = vec3( 0.5 ).sub( p.abs() );
+				return min( min( max( e.x, e.y ), max( e.y, e.z ) ), max( e.z, e.x ) );
+
+			}
+
+			function fresnel( power ) {
+
+				const facing = normalWorld.dot( cameraPosition.sub( positionWorld ).normalize() ).clamp();
+				return facing.oneMinus().pow( power );
+
+			}
+
+			// perturbs the normal from a procedural height field, sampled at the
+			// screen-space derivative offsets of the local position
+
+			function proceduralBump( heightAt, scale ) {
+
+				return Fn( () => {
+
+					// derivatives are clamped to keep silhouette pixels stable
+
+					const height = heightAt( positionLocal );
+					const dHdx = heightAt( positionLocal.add( dFdx( positionLocal ).clamp( - 0.01, 0.01 ) ) ).sub( height );
+					const dHdy = heightAt( positionLocal.add( dFdy( positionLocal ).clamp( - 0.01, 0.01 ) ) ).sub( height );
+
+					const sigmaX = dFdx( positionView );
+					const sigmaY = dFdy( positionView );
+
+					const r1 = sigmaY.cross( normalView );
+					const r2 = normalView.cross( sigmaX );
+
+					const det = sigmaX.dot( r1 ).mul( faceDirection );
+					const gradient = det.sign().mul( dHdx.mul( r1 ).add( dHdy.mul( r2 ) ) ).mul( scale );
+
+					return det.abs().mul( normalView ).sub( gradient ).normalize();
+
+				} )();
+
+			}
+
+			function spectrum( t ) {
+
+				return cos( vec3( t ).add( vec3( 0, 0.33, 0.67 ) ).mul( Math.PI * 2 ) ).mul( 0.5 ).add( 0.5 );
+
+			}
+
+			// decorative frame carved around each face - a wide groove, an inner
+			// hairline and diagonal ticks across the corners
+
+			function etchMask( p ) {
+
+				const d = faceEdgeDist( p );
+
+				const frame = smoothstep( 0.004, 0.016, d.sub( 0.1 ).abs() ).oneMinus();
+				const hairline = smoothstep( 0.002, 0.009, d.sub( 0.14 ).abs() ).oneMinus();
+
+				const e = vec3( 0.5 ).sub( p.abs() );
+				const diagonal = e.x.add( e.y ).add( e.z ).sub( d.mul( 2 ) ).abs();
+				const corner = smoothstep( 0.004, 0.014, diagonal ).oneMinus().mul( smoothstep( 0.1, 0.12, d ) ).mul( smoothstep( 0.24, 0.2, d ) );
+
+				return frame.add( hairline.mul( 0.6 ) ).add( corner.mul( 0.9 ) ).clamp();
+
+			}
+
+			// body surfaces ----------------------------------------------------------
+			//
+			// each surface fills a description - color, roughness, emissive, height
+			// layers - which the finishes then build upon before the material is made
+
+			const SURFACES = {
+
+				ceramic: ( surf ) => {
+
+					const p = positionLocal;
+
+					const tone = fbm( p.mul( 2.6 ).add( 4.7 ) ).mul( 0.5 ).add( 0.5 );
+					const flecks = smoothstep( 0.6, 0.75, mx_noise_float( p.mul( 95 ).add( 3.1 ) ) );
+					const smudge = fbm( p.mul( 6.5 ).add( 17.3 ), 2 ).mul( 0.5 ).add( 0.5 );
+
+					surf.color = mix( color( 0xf0eadb ), color( 0xfbf9f2 ), tone );
+					surf.color = mix( surf.color, color( 0xb8b2a3 ), flecks.mul( 0.5 ) );
+					surf.roughness = float( 0.12 ).add( smudge.mul( 0.12 ) ).add( flecks.mul( 0.2 ) );
+					surf.clearcoat = float( 0.7 );
+					surf.clearcoatRoughness = float( 0.18 ).add( smudge.mul( 0.1 ) );
+					surf.props = { envMapIntensity: 1.15 };
+					surf.height.push( ( q ) => fbm( q.mul( 34 ).add( 7.7 ), 2 ) );
+					surf.bumpScale = 0.0012;
+
+				},
+
+				chalk: ( surf ) => {
+
+					const p = positionLocal;
+					const bevel = bevelMask();
+
+					const grain = fbm( p.mul( 120 ), 2 );
+					const blotch = fbm( p.mul( 3.4 ).add( 23 ) ).mul( 0.5 ).add( 0.5 );
+
+					surf.color = mix( color( 0xece9e1 ), color( 0xd9d4c8 ), blotch.mul( 0.7 ) ).mul( grain.mul( 0.05 ).add( 1 ) );
+					surf.color = mix( surf.color, color( 0xf7f6f2 ), bevel.mul( 0.55 ) );
+					surf.roughness = float( 0.97 ).sub( bevel.mul( 0.08 ) );
+					surf.sheen = color( 0xffffff ).mul( 0.35 );
+					surf.sheenRoughness = float( 0.85 );
+					surf.aoStrength = 0.5;
+					surf.height.push( ( q ) => fbm( q.mul( 150 ), 2 ).mul( 0.55 ).sub( mx_worley_noise_float( q.mul( 48 ).add( 5.5 ) ).oneMinus().pow( 6 ).mul( 0.8 ) ) );
+					surf.bumpScale = 0.002;
+
+				},
+
+				ivory: ( surf ) => {
+
+					const p = positionLocal;
+					const bevel = bevelMask();
+					const axis = vec3( 0.18, 0.94, 0.29 );
+
+					const band = ( q ) => sin( q.dot( axis ).mul( 58 ).add( fbm( q.mul( 5.2 ).add( 31 ) ).mul( 3.6 ) ) );
+					const aged = fbm( p.mul( 2.1 ).add( 12.5 ) ).mul( 0.5 ).add( 0.5 );
+					const grain = band( p ).mul( 0.5 ).add( 0.5 );
+
+					surf.color = mix( color( 0xf6efdd ), color( 0xe4d6b0 ), aged.mul( 0.75 ) );
+					surf.color = mix( surf.color, color( 0xd9c69c ), grain.pow( 2 ).mul( 0.35 ) );
+					surf.color = mix( surf.color, color( 0xcfa86a ), attribute( 'pipAo' ).mul( 0.4 ) );
+					surf.roughness = float( 0.34 ).add( grain.mul( 0.06 ) ).sub( bevel.mul( 0.12 ) );
+					surf.clearcoat = float( 0.45 );
+					surf.clearcoatRoughness = float( 0.28 );
+					surf.emissive = color( 0xffdda6 ).mul( fresnel( 2.5 ) ).mul( 0.09 );
+					surf.height.push( ( q ) => band( q ).mul( 0.5 ) );
+					surf.bumpScale = 0.0008;
+
+				},
+
+				crystal: ( surf ) => {
+
+					const p = positionLocal;
+					const incident = positionWorld.sub( cameraPosition ).normalize();
+					const refracted = refract( incident, normalWorld, 1 / 1.55 );
+
+					const cloud = smoothstep( 0.32, 0.85, fbm( p.mul( 4.1 ).add( 8.2 ), 4 ).mul( 0.5 ).add( 0.5 ) );
+					const wisp = fbm( p.add( refracted.mul( 0.16 ) ).mul( 5.5 ).add( 2.7 ) ).abs().oneMinus().pow( 3 );
+					const sparkle = mx_worley_noise_float( p.add( refracted.mul( 0.1 ) ).mul( 70 ).add( 4.4 ) ).oneMinus().pow( 20 );
+
+					surf.color = mix( color( 0xffffff ), color( 0xe3edf4 ), cloud.mul( 0.5 ) );
+					surf.roughness = float( 0.02 ).add( cloud.mul( 0.28 ) );
+					surf.clearcoat = float( 1 );
+					surf.clearcoatRoughness = float( 0.03 );
+					surf.emissive = color( 0xf4f9ff ).mul( wisp.mul( cloud ).mul( 0.12 ).add( sparkle.mul( 0.35 ) ) );
+					surf.aoStrength = 0.2;
+					surf.props = { transmission: 1, thickness: 0.8, ior: 1.55, attenuationColor: new THREE.Color( 0xe9f2f8 ), attenuationDistance: 2.2, envMapIntensity: 1.2 };
+
+				},
+
+				obsidian: ( surf ) => {
+
+					const p = positionLocal;
+					const bevel = bevelMask();
+					const incident = positionWorld.sub( cameraPosition ).normalize();
+					const refracted = refract( incident, normalWorld, 1 / 1.5 );
+
+					const flow = fbm( vec3( p.x.mul( 2.4 ), p.y.mul( 7 ), p.z.mul( 2.4 ) ).add( 15.5 ) );
+					const smoke = fbm( p.add( refracted.mul( 0.14 ) ).mul( 3.6 ).add( 9.1 ) ).mul( 0.5 ).add( 0.5 );
+					const glint = mx_worley_noise_float( p.add( refracted.mul( 0.08 ) ).mul( 34 ).add( 1.2 ) ).oneMinus().pow( 30 );
+
+					surf.color = mix( color( 0x0b0b0e ), color( 0x16171d ), flow.mul( 0.5 ).add( 0.5 ).mul( 0.45 ) );
+					surf.roughness = float( 0.04 ).add( flow.abs().mul( 0.03 ) ).sub( bevel.mul( 0.02 ) ).clamp( 0.02, 1 );
+					surf.clearcoat = float( 1 );
+					surf.clearcoatRoughness = float( 0.02 );
+					surf.emissive = color( 0x99a3b8 ).mul( smoke.mul( smoke ) ).mul( 0.03 ).add( color( 0xcfd8e8 ).mul( glint ).mul( 0.06 ) );
+					surf.aoStrength = 0.6;
+					surf.props = { envMapIntensity: 1.0 };
+					surf.height.push( ( q ) => sin( fbm( q.mul( 3 ), 2 ).mul( 7 ).add( q.dot( vec3( 2.2, 5.1, 3.4 ) ) ) ) );
+					surf.bumpScale = 0.0006;
+
+				},
+
+				lead: ( surf ) => {
+
+					const p = positionLocal;
+					const bevel = bevelMask();
+
+					const oxide = smoothstep( 0.25, 0.85, fbm( p.mul( 3.2 ).add( 41 ), 4 ).mul( 0.5 ).add( 0.5 ) );
+					const mottle = fbm( p.mul( 38 ).add( 7 ), 2 ).mul( 0.5 ).add( 0.5 );
+					const scratches = max(
+						smoothstep( 0, 0.05, mx_noise_float( vec3( p.x.mul( 4 ), p.y.mul( 170 ), p.z.mul( 4 ) ).add( 3.3 ) ).abs() ).oneMinus(),
+						smoothstep( 0, 0.05, mx_noise_float( vec3( p.x.mul( 150 ), p.y.mul( 5 ), p.z.mul( 160 ) ).add( 8.1 ) ).abs() ).oneMinus()
+					);
+
+					surf.color = mix( color( 0x64676d ), color( 0x82868c ), oxide ).mul( mottle.mul( 0.1 ).add( 0.95 ) ).add( scratches.mul( 0.05 ) );
+					surf.color = mix( surf.color, color( 0x9aa0a6 ), bevel.mul( 0.35 ) );
+					surf.metalness = float( 0.9 ).sub( oxide.mul( 0.25 ) );
+					surf.roughness = float( 0.55 ).add( oxide.mul( 0.25 ) ).sub( bevel.mul( 0.2 ) ).sub( scratches.mul( 0.15 ) ).clamp( 0.2, 1 );
+					surf.height.push( ( q ) => fbm( q.mul( 5.5 ).add( 19 ) ).mul( 1.2 ) );
+					surf.bumpScale = 0.0025;
+
+				},
+
+				gilded: ( surf ) => {
+
+					const p = positionLocal;
+					const bevel = bevelMask();
+
+					const wear = fbm( p.mul( 6.2 ).add( 43 ) ).mul( 0.5 ).add( 0.5 );
+					const scratches = max(
+						smoothstep( 0, 0.045, mx_noise_float( vec3( p.x.mul( 7 ), p.y.mul( 260 ), p.z.mul( 7 ) ).add( 13 ) ).abs() ).oneMinus(),
+						smoothstep( 0, 0.045, mx_noise_float( vec3( p.x.mul( 240 ), p.y.mul( 8 ), p.z.mul( 250 ) ).add( 27 ) ).abs() ).oneMinus()
+					);
+
+					surf.color = mix( color( 0xc08c2c ), color( 0xf1cd6f ), wear );
+					surf.color = mix( surf.color, color( 0xffe9ad ), bevel.mul( 0.5 ) );
+					surf.color = mix( surf.color, color( 0x8a6a25 ), scratches.mul( 0.35 ) );
+					surf.metalness = float( 1 );
+					surf.roughness = float( 0.12 ).add( wear.mul( 0.05 ) ).add( scratches.mul( 0.12 ) ).sub( bevel.mul( 0.08 ) ).clamp( 0.04, 1 );
+					surf.props = { envMapIntensity: 1.35 };
+					surf.height.push( ( q ) => fbm( q.mul( 42 ).add( 3 ), 2 ) );
+					surf.bumpScale = 0.0007;
+
+				},
+
+				loaded: ( surf ) => {
+
+					SURFACES.ceramic( surf );
+
+					const p = positionLocal;
+
+					// a dense core shows faintly through the porcelain, and a stress
+					// ring marks the plugged face
+
+					const core = smoothstep( 0.62, 0.2, p.sub( vec3( - 0.24, - 0.08, 0.04 ) ).length() );
+					surf.color = surf.color.mul( core.mul( 0.14 ).oneMinus() );
+
+					const onFace = smoothstep( 0.42, 0.5, p.x.negate() );
+					const ring = smoothstep( 0, 0.02, p.yz.length().sub( 0.135 ).abs() ).oneMinus().mul( onFace );
+					surf.color = mix( surf.color, color( 0x8d8d90 ), ring.mul( 0.35 ) );
+
+				},
+
+				prism: ( surf ) => {
+
+					const p = positionLocal;
+					const incident = positionWorld.sub( cameraPosition ).normalize();
+
+					// sample the environment once per channel at diverging angles,
+					// splitting the studio lights into their spectrum
+
+					const spectral = vec3(
+						pmremTexture( envMap, refract( incident, normalWorld, 1 / 1.58 ), float( 0.03 ) ).r,
+						pmremTexture( envMap, refract( incident, normalWorld, 1 / 1.66 ), float( 0.03 ) ).g,
+						pmremTexture( envMap, refract( incident, normalWorld, 1 / 1.74 ), float( 0.03 ) ).b
+					);
+
+					const rim = fresnel( 2 );
+
+					surf.color = color( 0xffffff );
+					surf.roughness = float( 0.015 );
+					surf.emissive = spectral.mul( 0.15 ).add( spectrum( rim.mul( 1.2 ).add( fbm( p.mul( 6 ), 2 ).mul( 0.2 ) ) ).mul( rim ).mul( 0.3 ) );
+					surf.aoStrength = 0.12;
+					surf.props = { transmission: 1, thickness: 1, ior: 1.66, dispersion: 3, attenuationColor: new THREE.Color( 0xffffff ), attenuationDistance: 4, iridescence: 0.4, iridescenceIOR: 1.55, envMapIntensity: 1.3 };
+
+				}
+
+			};
+
+			// finishes ---------------------------------------------------------------
+
+			const FINISHES = {
+
+				etched: ( surf ) => {
+
+					const groove = etchMask( positionLocal );
+
+					surf.color = mix( surf.color, surf.color.mul( 0.45 ), groove );
+					surf.roughness = surf.roughness.add( groove.mul( 0.3 ) );
+					surf.height.push( ( q ) => etchMask( q ).mul( - 6 ) );
+
+				},
+
+				neon: ( surf, def, phase ) => {
+
+					const glowColor = color( SUITS[ def.suit ?? 'emerald' ].neon );
+
+					const flicker = mx_noise_float( vec3( time.mul( 1.4 ), phase, 0 ) ).mul( 0.1 ).add( 0.92 );
+					const pulse = sin( time.mul( 1.7 ).add( phase ) ).mul( 0.08 ).add( 0.92 );
+
+					const edges = bevelMask().pow( 1.4 ).mul( 1.1 );
+					const inset = smoothstep( 0.002, 0.012, faceEdgeDist( positionLocal ).sub( 0.095 ).abs() ).oneMinus().mul( 0.8 );
+					const sockets = smoothstep( 0.1, 0.45, attribute( 'pipAo' ) ).mul( 0.9 );
+
+					const glow = glowColor.mul( edges.add( inset ).add( sockets ) ).mul( flicker.mul( pulse ) );
+
+					surf.emissive = surf.emissive === null ? glow : surf.emissive.add( glow );
+
+				},
+
+				aurora: ( surf, def, phase ) => {
+
+					const p = positionLocal;
+
+					const drift = time.mul( 0.18 ).add( phase );
+					const flow = fbm( vec3( p.x.mul( 1.7 ), p.y.mul( 2.6 ), p.z.mul( 1.7 ) ).add( vec3( drift, drift.mul( 0.55 ), drift.negate().mul( 0.4 ) ) ) );
+					const curtain = sin( p.y.mul( 2.6 ).add( flow.mul( 3.4 ) ).add( time.mul( 0.5 ) ) ).mul( 0.5 ).add( 0.5 ).pow( 1.8 );
+					const shift = sin( flow.mul( 2.2 ).add( time.mul( 0.27 ) ) ).mul( 0.5 ).add( 0.5 );
+
+					let auroraColor = mix( color( 0x2ee88a ), color( 0x35b9e6 ), shift );
+					auroraColor = mix( auroraColor, color( 0x5f6cf0 ), curtain.mul( shift ).mul( 0.45 ) );
+
+					const glow = auroraColor.mul( curtain.mul( fresnel( 1.8 ).mul( 0.7 ).add( 0.3 ) ).mul( 1.35 ) );
+
+					surf.emissive = surf.emissive === null ? glow : surf.emissive.add( glow );
+					surf.sheen = auroraColor.mul( 0.5 );
+					surf.sheenRoughness = float( 0.5 );
+
+				}
+
+			};
+
+			const bodyMaterials = new Map();
+
+			function getBodyMaterial( def, phase ) {
+
+				const key = ( def.material ?? 'ceramic' ) + '|' + ( def.finish ?? '' ) + '|' + ( def.suit ?? '' );
+
+				if ( bodyMaterials.has( key ) ) return bodyMaterials.get( key );
+
+				const surf = {
+					color: color( 0xffffff ),
+					roughness: float( 0.5 ),
+					metalness: float( 0 ),
+					emissive: null,
+					clearcoat: null,
+					clearcoatRoughness: null,
+					sheen: null,
+					sheenRoughness: null,
+					height: [],
+					bumpScale: 0.001,
+					aoStrength: 0.55,
+					props: {}
+				};
+
+				SURFACES[ def.material ?? 'ceramic' ]( surf );
+				if ( def.finish ) FINISHES[ def.finish ]( surf, def, phase );
+
+				const material = new THREE.MeshPhysicalNodeMaterial();
+
+				material.colorNode = surf.color.mul( attribute( 'pipAo' ).mul( surf.aoStrength ).oneMinus() );
+				material.roughnessNode = surf.roughness;
+				material.metalnessNode = surf.metalness;
+
+				if ( surf.emissive !== null ) material.emissiveNode = surf.emissive;
+				if ( surf.clearcoat !== null ) material.clearcoatNode = surf.clearcoat;
+				if ( surf.clearcoatRoughness !== null ) material.clearcoatRoughnessNode = surf.clearcoatRoughness;
+				if ( surf.sheen !== null ) material.sheenNode = surf.sheen;
+				if ( surf.sheenRoughness !== null ) material.sheenRoughnessNode = surf.sheenRoughness;
+				if ( surf.height.length > 0 ) material.normalNode = proceduralBump( ( q ) => surf.height.reduce( ( sum, layer ) => sum.add( layer( q ) ), float( 0 ) ), surf.bumpScale );
+
+				Object.assign( material, surf.props );
+
+				bodyMaterials.set( key, material );
+				return material;
+
+			}
+
+			// pip materials ----------------------------------------------------------
+			//
+			// the pips are gemstone inlays - view rays are refracted into each stone
+			// and the internal veils, zoning, inclusions and sparkle are sampled a
+			// short way along them, giving the gems believable interior depth
+
+			const pipMaterials = new Map();
+
+			function getPipMaterial( def ) {
+
+				const style = ( def.material === 'prism' ) ? 'prism' : ( def.suit ?? 'emerald' );
+				const key = style + '|' + ( def.finish ?? '' );
+
+				if ( pipMaterials.has( key ) ) return pipMaterials.get( key );
+
+				const material = new THREE.MeshPhysicalNodeMaterial();
+
+				const seed = attribute( 'gemSeed' );
+				const localPos = positionLocal.sub( attribute( 'gemCenter' ) );
+				const incident = positionWorld.sub( cameraPosition ).normalize();
+				const facing = normalWorld.dot( incident.negate() ).clamp();
+				const rim = facing.oneMinus().pow( 3 );
+				const noiseOffset = seed.mul( 43.7 );
+
+				if ( style === 'prism' ) {
+
+					// oil slick - a dark mirror under a shifting interference film
+
+					const swirl = fbm( localPos.mul( 26 ).add( noiseOffset ), 2 ).mul( 0.35 );
+					const oil = spectrum( facing.mul( 1.4 ).add( swirl ).add( seed ) );
+
+					material.colorNode = color( 0x08080a );
+					material.metalnessNode = float( 1 );
+					material.roughnessNode = float( 0.12 ).add( fbm( localPos.mul( 40 ), 2 ).abs().mul( 0.08 ) );
+					material.emissiveNode = oil.mul( rim.mul( 0.9 ).add( 0.25 ) ).mul( 0.9 );
+					material.iridescence = 1;
+					material.iridescenceIOR = 1.35;
+					material.envMapIntensity = 1.4;
+
+					if ( def.finish === 'neon' ) material.emissiveNode = material.emissiveNode.add( oil.mul( sin( time.mul( 1.7 ) ).mul( 0.15 ).add( 0.85 ) ).mul( 0.8 ) );
+
+				} else {
+
+					const suit = SUITS[ style ];
+
+					const shift = seed.sub( 0.5 ).mul( 0.18 );
+					const core = hue( color( suit.core ), shift );
+					const deep = hue( color( suit.deep ), shift );
+					const glowColor = hue( color( suit.glow ), shift );
+
+					const refracted = refract( incident, normalWorld, 1 / suit.ior );
+
+					const veilNear = fbm( localPos.add( refracted.mul( 0.05 ) ).mul( 34 ).add( noiseOffset ) ).mul( 0.5 ).add( 0.5 );
+					const veilFar = fbm( localPos.add( refracted.mul( 0.12 ) ).mul( 21 ).add( noiseOffset ) ).mul( 0.5 ).add( 0.5 );
+					const depthMix = veilNear.mul( 0.6 ).add( veilFar.mul( 0.4 ) );
+
+					const zoning = sin( depthMix.mul( 7 ).add( seed.mul( 20 ) ) ).mul( 0.5 ).add( 0.5 );
+					const inclusions = smoothstep( 0.02, 0.16, mx_worley_noise_float( localPos.mul( 52 ).add( noiseOffset ) ) ).oneMinus().mul( 0.5 );
+					const sparkle = mx_worley_noise_float( localPos.add( refracted.mul( 0.08 ) ).mul( 95 ).add( noiseOffset ) ).oneMinus().pow( 24 );
+
+					const interior = mix( deep, core, smoothstep( 0.15, 0.85, depthMix ) ).mul( zoning.mul( 0.3 ).add( 0.8 ) );
+					const through = pmremTexture( envMap, refracted, float( 0.22 ) ).mul( core ).mul( facing.mul( 0.7 ).add( 0.3 ) );
+
+					material.colorNode = mix( deep, core, depthMix.mul( 0.5 ) ).mul( 0.45 ).mul( inclusions.oneMinus() );
+					material.emissiveNode = through.mul( 0.32 )
+						.add( interior.mul( depthMix ).mul( 0.45 ).mul( facing ) )
+						.add( glowColor.mul( rim ).mul( 0.22 ) )
+						.mul( inclusions.mul( 0.7 ).oneMinus() )
+						.add( mix( color( 0xffffff ), glowColor, 0.35 ).mul( sparkle ).mul( 0.7 ) );
+					material.roughnessNode = float( 0.09 ).add( veilNear.mul( 0.04 ) );
+					material.ior = suit.ior;
+					material.clearcoat = 1;
+					material.clearcoatRoughness = 0.06;
+					material.envMapIntensity = 1.0;
+
+					if ( def.finish === 'neon' ) material.emissiveNode = material.emissiveNode.add( glowColor.mul( sin( time.mul( 1.7 ) ).mul( 0.15 ).add( 0.85 ) ).mul( 0.5 ) );
+
+				}
+
+				pipMaterials.set( key, material );
+				return material;
+
+			}
+
+			function createPlugMaterial() {
+
+				const material = new THREE.MeshStandardNodeMaterial();
+
+				const radius = positionLocal.yz.length();
+				const rings = sin( radius.mul( 480 ) ).mul( 0.5 ).add( 0.5 );
+				const wear = fbm( positionLocal.mul( 30 ).add( 3 ), 2 ).mul( 0.5 ).add( 0.5 );
+
+				material.colorNode = mix( color( 0x84898f ), color( 0xa7adb4 ), wear );
+				material.metalnessNode = float( 1 );
+				material.roughnessNode = float( 0.32 ).add( rings.mul( 0.2 ) );
+
+				return material;
+
+			}
+
+			// scene building ---------------------------------------------------------
+
+			const proxyGeometry = new THREE.BoxGeometry( 1.08, 1.08, 1.08 );
+			const proxyMaterial = new THREE.MeshBasicMaterial( { visible: false } );
+
+			function createDie( def, home, index, geometries ) {
+
+				const root = new THREE.Group();
+				root.position.copy( home );
+				scene.add( root );
+
+				const phase = index * 1.618;
+				const isLead = def.material === 'lead';
+				const isLoaded = def.material === 'loaded';
+
+				const body = new THREE.Mesh( isLead ? geometries.blankGeometry : geometries.bodyGeometry, getBodyMaterial( def, phase ) );
+				body.castShadow = true;
+				body.receiveShadow = true;
+				root.add( body );
+
+				if ( isLead === false ) {
+
+					const pips = new THREE.Mesh( isLoaded ? geometries.pluggedPipsGeometry : geometries.pipsGeometry, getPipMaterial( def ) );
+					root.add( pips );
+
+				}
+
+				if ( isLoaded ) {
+
+					const plugGeometry = new THREE.CylinderGeometry( 0.115, 0.115, 0.05, 48 );
+					plugGeometry.rotateZ( Math.PI / 2 );
+
+					const plug = new THREE.Mesh( plugGeometry, createPlugMaterial() );
+					plug.position.x = - 0.482;
+					root.add( plug );
+
+				}
+
+				const proxy = new THREE.Mesh( proxyGeometry, proxyMaterial );
+				root.add( proxy );
+
+				const die = { root, home, proxy, def };
+				proxy.userData.die = die;
+				dice.push( die );
+
+			}
+
+			function createLabel( text, font, home ) {
+
+				const geometry = new TextGeometry( text, { font, size: 0.13, depth: 0.012, curveSegments: 6 } );
+				geometry.computeBoundingBox();
+				geometry.translate( - 0.5 * ( geometry.boundingBox.max.x + geometry.boundingBox.min.x ), 0, 0 );
+				geometry.rotateX( - Math.PI / 2 + 0.95 );
+
+				const material = new THREE.MeshStandardNodeMaterial( { color: 0x83848c, roughness: 0.6 } );
+				material.emissiveNode = color( 0x3a3b42 );
+
+				const label = new THREE.Mesh( geometry, material );
+				label.position.set( home.x, 0.004, home.z + 0.72 );
+				scene.add( label );
+
+			}
+
+			function createSlab() {
+
+				const reflection = reflector( { resolutionScale: 0.35 } );
+				reflection.target.rotateX( - Math.PI / 2 );
+				reflection.target.position.y = 0.001;
+				scene.add( reflection.target );
+
+				const p = positionWorld;
+
+				reflection.uvNode = reflection.uvNode.add( vec2( mx_noise_float( p.mul( 3.1 ) ), mx_noise_float( p.mul( 3.3 ).add( 11 ) ) ).mul( 0.0015 ) );
+
+				const material = new THREE.MeshPhysicalNodeMaterial();
+
+				const veins = fbm( vec3( p.x.mul( 0.6 ), p.y.mul( 2 ), p.z.mul( 0.6 ) ).add( 3.7 ), 4 );
+				const marbling = veins.abs().oneMinus().pow( 12 );
+
+				material.colorNode = mix( color( 0x0f0f13 ), color( 0x15151a ), fbm( p.mul( 0.8 ) ).mul( 0.5 ).add( 0.5 ) ).add( color( 0x3a3f4d ).mul( marbling ).mul( 0.18 ) );
+				material.roughnessNode = float( 0.24 ).add( veins.mul( 0.04 ) );
+				material.clearcoatNode = float( 1 );
+				material.clearcoatRoughnessNode = float( 0.08 );
+				material.emissiveNode = reflection.rgb.mul( color( 0x96a3b8 ) ).mul( 0.2 );
+
+				// the mirrored image must stay out of the bloom pass
+
+				material.mrtNode = mrt( { emissive: vec4( 0, 0, 0, 1 ) } );
+
+				const slab = new THREE.Mesh( new RoundedBoxGeometry( 9.2, 0.5, 10.6, 4, 0.1 ), material );
+				slab.position.y = - 0.25;
+				slab.receiveShadow = true;
+				scene.add( slab );
+
+			}
+
+		</script>
+
+	</body>
+</html>
