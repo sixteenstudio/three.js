@@ -1,0 +1,1278 @@
+<!DOCTYPE html>
+<html lang="en">
+	<head>
+		<title>three.js webgpu - tsl dice</title>
+		<meta charset="utf-8">
+		<meta name="viewport" content="width=device-width, user-scalable=no, minimum-scale=1.0, maximum-scale=1.0">
+		<meta property="og:title" content="three.js webgpu - tsl dice">
+		<meta property="og:type" content="website">
+		<meta property="og:url" content="https://threejs.org/examples/webgpu_tsl_dice.html">
+		<meta property="og:image" content="https://threejs.org/examples/screenshots/webgpu_tsl_dice.jpg">
+		<link type="text/css" rel="stylesheet" href="example.css">
+		<style>
+
+			body {
+				cursor: grab;
+			}
+
+			body:active {
+				cursor: grabbing;
+			}
+
+		</style>
+	</head>
+	<body>
+
+		<div id="info">
+			<a href="https://threejs.org/" target="_blank" rel="noopener" class="logo-link"></a>
+
+			<div class="title-wrapper">
+				<a href="https://threejs.org/" target="_blank" rel="noopener">three.js</a><span>TSL Dice</span>
+			</div>
+
+			<small>
+				Procedural collectible dice with gemstone inlays. Click a die to inspect it.
+			</small>
+		</div>
+
+		<script type="importmap">
+			{
+				"imports": {
+					"three": "../build/three.webgpu.js",
+					"three/webgpu": "../build/three.webgpu.js",
+					"three/tsl": "../build/three.tsl.js",
+					"three/addons/": "./jsm/"
+				}
+			}
+		</script>
+
+		<script type="module">
+
+			import * as THREE from 'three/webgpu';
+			import {
+				abs,
+				bumpMap,
+				cameraPosition,
+				color,
+				float,
+				hue,
+				length,
+				max,
+				min,
+				mix,
+				mx_fractal_noise_float,
+				mx_noise_float,
+				mx_worley_noise_float,
+				normalWorldGeometry,
+				positionLocal,
+				positionWorld,
+				screenUV,
+				sin,
+				smoothstep,
+				time,
+				vec3
+			} from 'three/tsl';
+
+			import { Inspector } from 'three/addons/inspector/Inspector.js';
+
+			import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+			import { HDRLoader } from 'three/addons/loaders/HDRLoader.js';
+			import WebGPU from 'three/addons/capabilities/WebGPU.js';
+
+			let camera, scene, renderer, controls, timer;
+			let showcase, raycaster, pointer;
+			let selectedDie = null;
+			let focusTransition = 1;
+
+			const dice = [];
+			const pickMeshes = [];
+			const bodyMaterials = new Map();
+			const pipMaterials = new Map();
+			const socketMaterials = new Map();
+			const plugMaterials = new Map();
+			const sharedGeometries = {};
+			const overviewCamera = new THREE.Vector3( 0, 8.6, 12.4 );
+			const overviewTarget = new THREE.Vector3( 0, 0.25, 0 );
+			const focusCamera = new THREE.Vector3( 0, 4.25, 7.45 );
+			const focusTarget = new THREE.Vector3( 0, 1.05, 3.85 );
+			const focusPosition = new THREE.Vector3( 0, 1.28, 3.85 );
+			const focusScale = new THREE.Vector3( 1.48, 1.48, 1.48 );
+			const cameraStart = new THREE.Vector3();
+			const cameraEnd = new THREE.Vector3();
+			const targetStart = new THREE.Vector3();
+			const targetEnd = new THREE.Vector3();
+
+			const up = new THREE.Vector3( 0, 0, 1 );
+			const pipQuaternion = new THREE.Quaternion();
+			const tempVector = new THREE.Vector3();
+			const tempColor = new THREE.Color();
+
+			const suits = {
+				Emerald: {
+					base: '#00a86b',
+					deep: '#003f2b',
+					bright: '#86ffd3'
+				},
+				Ruby: {
+					base: '#b40d22',
+					deep: '#420008',
+					bright: '#ff9aa0'
+				},
+				Sapphire: {
+					base: '#0b58c9',
+					deep: '#02194d',
+					bright: '#8cc8ff'
+				},
+				Amethyst: {
+					base: '#7b2cbf',
+					deep: '#240733',
+					bright: '#df9bff'
+				}
+			};
+
+			const layout = [
+				[
+					{ label: 'Emerald', suit: 'Emerald' },
+					{ label: 'Ruby', suit: 'Ruby' },
+					{ label: 'Sapphire', suit: 'Sapphire' },
+					{ label: 'Amethyst', suit: 'Amethyst' }
+				],
+				[
+					{ label: 'Chalk', material: 'Chalk' },
+					{ label: 'Ivory', material: 'Ivory' },
+					{ label: 'Crystal', material: 'Crystal' },
+					{ label: 'Obsidian', material: 'Obsidian' },
+					{ label: 'Lead', material: 'Lead', pips: false }
+				],
+				[
+					{ label: 'Gilded', material: 'Gilded' },
+					{ label: 'Loaded', material: 'Loaded' },
+					{ label: 'Prism', material: 'Prism', pipMaterial: 'Prism' },
+					{ label: 'Etched', finish: 'Etched' },
+					{ label: 'Neon', finish: 'Neon' }
+				],
+				[
+					{ label: 'Aurora', finish: 'Aurora' },
+					{ label: 'Obsidian Neon', material: 'Obsidian', finish: 'Neon' },
+					{ label: 'Crystal Etched', material: 'Crystal', finish: 'Etched' },
+					{ label: 'Gilded Aurora', material: 'Gilded', finish: 'Aurora' },
+					{ label: 'Ivory Neon', material: 'Ivory', finish: 'Neon' }
+				],
+				[
+					{ label: 'Chalk Etched', material: 'Chalk', finish: 'Etched' },
+					{ label: 'Loaded Aurora', material: 'Loaded', finish: 'Aurora' },
+					{ label: 'Prism Neon', material: 'Prism', finish: 'Neon', pipMaterial: 'Prism' },
+					{ label: 'Obsidian Etched', material: 'Obsidian', finish: 'Etched' }
+				]
+			];
+
+			const faceDefinitions = [
+				{
+					normal: new THREE.Vector3( 0, 1, 0 ),
+					u: new THREE.Vector3( 1, 0, 0 ),
+					v: new THREE.Vector3( 0, 0, - 1 ),
+					count: 5
+				},
+				{
+					normal: new THREE.Vector3( 0, 0, 1 ),
+					u: new THREE.Vector3( 1, 0, 0 ),
+					v: new THREE.Vector3( 0, 1, 0 ),
+					count: 6
+				},
+				{
+					normal: new THREE.Vector3( 1, 0, 0 ),
+					u: new THREE.Vector3( 0, 0, - 1 ),
+					v: new THREE.Vector3( 0, 1, 0 ),
+					count: 3
+				},
+				{
+					normal: new THREE.Vector3( - 1, 0, 0 ),
+					u: new THREE.Vector3( 0, 0, 1 ),
+					v: new THREE.Vector3( 0, 1, 0 ),
+					count: 4
+				},
+				{
+					normal: new THREE.Vector3( 0, 0, - 1 ),
+					u: new THREE.Vector3( - 1, 0, 0 ),
+					v: new THREE.Vector3( 0, 1, 0 ),
+					count: 1
+				},
+				{
+					normal: new THREE.Vector3( 0, - 1, 0 ),
+					u: new THREE.Vector3( 1, 0, 0 ),
+					v: new THREE.Vector3( 0, 0, 1 ),
+					count: 2
+				}
+			];
+
+			if ( WebGPU.isAvailable() === false ) {
+
+				document.body.appendChild( WebGPU.getErrorMessage() );
+
+				throw new Error( 'No WebGPU support' );
+
+			}
+
+			init();
+
+			async function init() {
+
+				timer = new THREE.Timer();
+				timer.connect( document );
+
+				camera = new THREE.PerspectiveCamera( 38, window.innerWidth / window.innerHeight, 0.1, 100 );
+				camera.position.copy( overviewCamera );
+
+				scene = new THREE.Scene();
+				scene.backgroundNode = screenUV.distance( 0.5 ).smoothstep( 0.2, 0.78 ).mix( color( 0x141417 ), color( 0x030405 ) );
+
+				renderer = new THREE.WebGPURenderer( { antialias: true } );
+				renderer.setPixelRatio( window.devicePixelRatio );
+				renderer.setSize( window.innerWidth, window.innerHeight );
+				renderer.setAnimationLoop( animate );
+				renderer.toneMapping = THREE.ACESFilmicToneMapping;
+				renderer.toneMappingExposure = 0.82;
+				renderer.shadowMap.enabled = true;
+				renderer.shadowMap.type = THREE.PCFShadowMap;
+				renderer.inspector = new Inspector();
+				document.body.appendChild( renderer.domElement );
+
+				controls = new OrbitControls( camera, renderer.domElement );
+				controls.enableDamping = true;
+				controls.minDistance = 4;
+				controls.maxDistance = 15;
+				controls.maxPolarAngle = Math.PI * 0.48;
+				controls.target.copy( overviewTarget );
+				controls.update();
+
+				const hdrTexture = await new HDRLoader()
+					.setPath( 'textures/equirectangular/' )
+					.loadAsync( 'monochrome_studio_02_1k.hdr' );
+
+				hdrTexture.mapping = THREE.EquirectangularReflectionMapping;
+				scene.environment = hdrTexture;
+				scene.environmentIntensity = 1.2;
+				scene.backgroundBlurriness = 0.65;
+
+				createLighting();
+				createSurface();
+				createDiceSheet();
+
+				raycaster = new THREE.Raycaster();
+				pointer = new THREE.Vector2();
+
+				window.addEventListener( 'resize', onWindowResize );
+				renderer.domElement.addEventListener( 'click', onClick );
+
+			}
+
+			function createLighting() {
+
+				scene.add( new THREE.HemisphereLight( 0xdfe8ff, 0x08090b, 0.45 ) );
+
+				const key = new THREE.DirectionalLight( 0xffffff, 2.7 );
+				key.position.set( - 4, 7, 6 );
+				key.castShadow = true;
+				key.shadow.mapSize.set( 4096, 4096 );
+				key.shadow.camera.near = 1;
+				key.shadow.camera.far = 18;
+				key.shadow.camera.left = - 7;
+				key.shadow.camera.right = 7;
+				key.shadow.camera.top = 7;
+				key.shadow.camera.bottom = - 7;
+				key.shadow.normalBias = 0.035;
+				scene.add( key );
+
+				const rim = new THREE.PointLight( 0x82d8ff, 12, 10, 1.7 );
+				rim.position.set( 4.5, 3, - 3.5 );
+				scene.add( rim );
+
+				const warm = new THREE.PointLight( 0xffd69a, 5, 9, 1.6 );
+				warm.position.set( - 4, 2, 4 );
+				scene.add( warm );
+
+			}
+
+			function createSurface() {
+
+				const p = positionWorld.mul( 0.55 );
+				const stone = mx_fractal_noise_float( p, 5 ).mul( 0.5 ).add( 0.5 );
+				const veins = mx_worley_noise_float( positionWorld.mul( 1.8 ) ).oneMinus().pow( 7 );
+
+				const material = new THREE.MeshStandardNodeMaterial( {
+					metalness: 0.03,
+					roughness: 0.32
+				} );
+				material.colorNode = mix( color( 0x08090b ), color( 0x232225 ), stone.mul( 0.45 ) ).add( color( 0x76808a ).mul( veins.mul( 0.09 ) ) );
+				material.roughnessNode = mx_noise_float( positionWorld.mul( 1.6 ) ).mul( 0.08 ).add( 0.24 );
+				material.normalNode = bumpMap( stone.mul( 0.035 ).add( veins.mul( 0.025 ) ) );
+
+				const surface = new THREE.Mesh( new THREE.PlaneGeometry( 14.6, 13.2, 1, 1 ), material );
+				surface.rotation.x = - Math.PI / 2;
+				surface.position.y = - 0.02;
+				surface.position.z = 0.15;
+				surface.receiveShadow = true;
+				scene.add( surface );
+
+			}
+
+			function createDiceSheet() {
+
+				showcase = new THREE.Group();
+				scene.add( showcase );
+
+				const rowSpacing = 2.05;
+				const columnSpacing = 2.05;
+				const sheetZ = ( layout.length - 1 ) * rowSpacing * 0.5;
+
+				for ( let row = 0; row < layout.length; row ++ ) {
+
+					const entries = layout[ row ];
+					const rowWidth = ( entries.length - 1 ) * columnSpacing;
+
+					for ( let column = 0; column < entries.length; column ++ ) {
+
+						const entry = entries[ column ];
+						const home = new THREE.Vector3(
+							column * columnSpacing - rowWidth * 0.5,
+							0.53,
+							sheetZ - row * rowSpacing
+						);
+
+						const die = createDie( entry, home );
+						dice.push( die );
+						showcase.add( die.group );
+						showcase.add( die.label );
+
+					}
+
+				}
+
+			}
+
+			function createDie( entry, home ) {
+
+				const materialName = entry.material || 'Ceramic';
+				const finishName = entry.finish || null;
+				const suitName = entry.suit || 'Emerald';
+				const pipMaterialName = entry.pipMaterial || ( materialName === 'Prism' ? 'Prism' : suitName );
+				const hasPips = entry.pips !== false && materialName !== 'Lead';
+				const group = new THREE.Group();
+				group.position.copy( home );
+				group.rotation.y = - 0.52;
+				group.userData.homeRotationY = group.rotation.y;
+
+				const body = new THREE.Mesh(
+					getDieBodyGeometry(),
+					getBodyMaterial( materialName, finishName )
+				);
+				body.castShadow = true;
+				body.receiveShadow = true;
+				body.userData.die = group;
+				group.add( body );
+				pickMeshes.push( body );
+
+				if ( hasPips ) {
+
+					addPips( group, getPipMaterial( pipMaterialName, finishName ), getSocketMaterial( materialName, finishName ) );
+
+				}
+
+				if ( materialName === 'Loaded' ) {
+
+					addLoadedPlug( group, finishName );
+
+				}
+
+				const label = createLabel( entry.label, home );
+				const die = {
+					group,
+					label,
+					home: home.clone(),
+					scale: new THREE.Vector3( 1, 1, 1 )
+				};
+
+				group.userData.dieData = die;
+
+				return die;
+
+			}
+
+			function getBodyMaterial( name, finish ) {
+
+				const key = `${ name }:${ finish || '' }`;
+
+				if ( bodyMaterials.has( key ) ) return bodyMaterials.get( key );
+
+				const material = createBodyMaterial( name, finish );
+				bodyMaterials.set( key, material );
+
+				return material;
+
+			}
+
+			function getPipMaterial( name, finish ) {
+
+				const key = `${ name }:${ finish || '' }`;
+
+				if ( pipMaterials.has( key ) ) return pipMaterials.get( key );
+
+				const material = createPipMaterial( name, finish );
+				pipMaterials.set( key, material );
+
+				return material;
+
+			}
+
+			function getSocketMaterial( name, finish ) {
+
+				const key = `${ name }:${ finish || '' }`;
+
+				if ( socketMaterials.has( key ) ) return socketMaterials.get( key );
+
+				const material = createSocketMaterial( name, finish );
+				socketMaterials.set( key, material );
+
+				return material;
+
+			}
+
+			function getPlugMaterial( finish ) {
+
+				const key = finish || '';
+
+				if ( plugMaterials.has( key ) ) return plugMaterials.get( key );
+
+				const material = createPlugMaterial( finish );
+				plugMaterials.set( key, material );
+
+				return material;
+
+			}
+
+			function createBodyMaterial( name, finish ) {
+
+				const material = new THREE.MeshPhysicalNodeMaterial();
+				material.envMapIntensity = 1.35;
+				material.clearcoat = 0.55;
+				material.clearcoatRoughness = 0.12;
+				material.ior = 1.5;
+
+				const p = positionLocal;
+				const fine = mx_noise_float( p.mul( 45 ).add( vec3( hashSeed( name, finish, 1 ) ) ) );
+				const cloudy = mx_fractal_noise_float( p.mul( 4.5 ).add( vec3( hashSeed( name, finish, 2 ) ) ), 5 ).mul( 0.5 ).add( 0.5 );
+				const worley = mx_worley_noise_float( p.mul( 18 ).add( vec3( hashSeed( name, finish, 3 ) ) ) );
+				const edge = edgeMask();
+				const face = faceMask();
+
+				let bodyColor = mix( color( 0xf0ece2 ), color( 0xded8cb ), cloudy.mul( 0.28 ) );
+				let roughness = fine.mul( 0.08 ).add( 0.23 );
+				let metalness = float( 0 );
+				let height = fine.mul( 0.012 ).add( cloudy.mul( 0.01 ) );
+				let emissiveNode = color( 0x000000 );
+
+				if ( name === 'Chalk' ) {
+
+					const pores = worley.oneMinus().pow( 3 );
+					bodyColor = mix( color( 0xd8d2c5 ), color( 0xf3f0e8 ), pores.mul( 0.45 ) ).add( color( 0xffffff ).mul( edge.mul( 0.12 ) ) );
+					roughness = pores.mul( 0.18 ).add( 0.78 );
+					height = pores.mul( 0.075 ).add( fine.mul( 0.035 ) );
+					material.clearcoat = 0;
+
+				} else if ( name === 'Ivory' ) {
+
+					const grain = sin( p.y.mul( 28 ).add( mx_fractal_noise_float( p.mul( 5 ), 4 ).mul( 6 ) ) ).mul( 0.5 ).add( 0.5 );
+					const age = mx_noise_float( p.mul( 2.2 ).add( vec3( 31 ) ) ).mul( 0.5 ).add( 0.5 );
+					bodyColor = mix( color( 0xf5e2b2 ), color( 0xfff2cf ), grain.mul( 0.45 ) );
+					bodyColor = mix( bodyColor, color( 0xc99855 ), age.mul( 0.18 ) );
+					roughness = grain.mul( 0.11 ).add( 0.26 );
+					height = grain.mul( 0.025 ).add( fine.mul( 0.01 ) );
+					material.transmission = 0.12;
+					material.thickness = 0.24;
+					material.attenuationColor = new THREE.Color( 0xffd78a );
+					material.attenuationDistance = 0.75;
+
+				} else if ( name === 'Crystal' ) {
+
+					const cloud = mx_fractal_noise_float( p.mul( 7 ).add( vec3( 9 ) ), 5 ).mul( 0.5 ).add( 0.5 );
+					const caustic = sin( p.x.mul( 35 ).add( p.z.mul( 21 ) ).add( cloudy.mul( 8 ) ) ).abs().pow( 12 );
+					bodyColor = mix( color( 0xcceeff ), color( 0xffffff ), cloud.mul( 0.55 ) ).add( color( 0x9df8ff ).mul( caustic.mul( 0.18 ) ) );
+					roughness = cloud.mul( 0.12 ).add( 0.02 );
+					height = cloud.mul( 0.02 ).add( caustic.mul( 0.025 ) );
+					material.transparent = true;
+					material.depthWrite = false;
+					material.opacity = 0.58;
+					material.transmission = 0.86;
+					material.thickness = 0.65;
+					material.ior = 1.46;
+					material.clearcoat = 1;
+					material.clearcoatRoughness = 0.02;
+					material.attenuationColor = new THREE.Color( 0xbfeeff );
+					material.attenuationDistance = 1.05;
+
+				} else if ( name === 'Obsidian' ) {
+
+					const smoke = mx_fractal_noise_float( p.mul( 5 ).add( vec3( 44 ) ), 5 ).mul( 0.5 ).add( 0.5 );
+					const fracture = mx_worley_noise_float( p.mul( 11 ).add( vec3( 4 ) ) ).oneMinus().pow( 8 );
+					bodyColor = mix( color( 0x020203 ), color( 0x17151c ), smoke.mul( 0.75 ) ).add( color( 0x4dfff2 ).mul( fracture.mul( 0.035 ) ) );
+					roughness = smoke.mul( 0.08 ).add( 0.06 );
+					height = fracture.mul( 0.025 ).add( smoke.mul( 0.009 ) );
+					emissiveNode = color( 0x071d18 ).mul( fracture.mul( 0.18 ) );
+					material.clearcoat = 1;
+					material.clearcoatRoughness = 0.03;
+					material.ior = 1.58;
+
+				} else if ( name === 'Lead' ) {
+
+					const oxidation = mx_fractal_noise_float( p.mul( 11 ).add( vec3( 101 ) ), 5 ).mul( 0.5 ).add( 0.5 );
+					const bruises = mx_worley_noise_float( p.mul( 24 ).add( vec3( 7 ) ) ).oneMinus().pow( 4 );
+					bodyColor = mix( color( 0x56585b ), color( 0x2d3032 ), oxidation.mul( 0.62 ) ).add( color( 0x90948c ).mul( edge.mul( 0.12 ) ) );
+					bodyColor = mix( bodyColor, color( 0x202324 ), bruises.mul( 0.25 ) );
+					roughness = oxidation.mul( 0.18 ).add( 0.55 );
+					metalness = float( 0.72 );
+					height = oxidation.mul( 0.035 ).add( bruises.mul( 0.028 ) );
+					material.clearcoat = 0;
+
+				} else if ( name === 'Gilded' ) {
+
+					const scratches = sin( p.y.mul( 420 ).add( p.x.mul( 42 ) ) ).abs().pow( 35 );
+					const tarnish = mx_fractal_noise_float( p.mul( 8 ).add( vec3( 17 ) ), 4 ).mul( 0.5 ).add( 0.5 );
+					bodyColor = mix( color( 0xc58a1c ), color( 0xffd05a ), tarnish.mul( 0.6 ) ).add( color( 0xffffff ).mul( edge.mul( 0.18 ) ) );
+					roughness = scratches.mul( 0.18 ).add( tarnish.mul( 0.06 ) ).add( 0.13 );
+					metalness = float( 1 );
+					height = scratches.mul( 0.018 ).add( tarnish.mul( 0.012 ) );
+					material.clearcoat = 0.35;
+					material.clearcoatRoughness = 0.18;
+
+				} else if ( name === 'Loaded' ) {
+
+					const offsetCore = length( p.sub( vec3( 0.18, - 0.08, 0.12 ) ) ).smoothstep( 0.52, 0.08 );
+					bodyColor = mix( color( 0xf4f1e9 ), color( 0xbbb4a8 ), cloudy.mul( 0.22 ).add( offsetCore.mul( 0.22 ) ) );
+					roughness = fine.mul( 0.07 ).add( 0.27 ).add( offsetCore.mul( 0.08 ) );
+					height = fine.mul( 0.013 ).add( offsetCore.mul( 0.035 ) );
+					material.clearcoat = 0.5;
+					material.clearcoatRoughness = 0.16;
+
+				} else if ( name === 'Prism' ) {
+
+					const film = hue( color( 0x9eefff ), p.x.add( p.y.mul( 0.45 ) ).add( time.mul( 0.12 ) ) );
+					const prismCloud = mx_fractal_noise_float( p.mul( 8 ).add( vec3( 23 ) ), 4 ).mul( 0.5 ).add( 0.5 );
+					bodyColor = mix( color( 0xdff7ff ), film, prismCloud.mul( 0.42 ).add( face.mul( 0.25 ) ) );
+					roughness = prismCloud.mul( 0.07 ).add( 0.01 );
+					height = prismCloud.mul( 0.016 );
+					material.transparent = true;
+					material.depthWrite = false;
+					material.opacity = 0.48;
+					material.transmission = 1;
+					material.thickness = 0.72;
+					material.ior = 1.55;
+					material.dispersion = 0.85;
+					material.iridescence = 1;
+					material.iridescenceIOR = 1.8;
+					material.iridescenceThicknessRange = [ 120, 720 ];
+					material.clearcoat = 1;
+					material.clearcoatRoughness = 0;
+					material.attenuationColor = new THREE.Color( 0xcaf4ff );
+					material.attenuationDistance = 1.2;
+					emissiveNode = film.mul( face.mul( 0.08 ) );
+
+				}
+
+				if ( finish === 'Etched' ) {
+
+					const border = etchedBorder();
+					bodyColor = mix( bodyColor, color( 0x151515 ), border.mul( name === 'Obsidian' ? 0.35 : 0.22 ) );
+					roughness = roughness.add( border.mul( 0.22 ) );
+					height = height.sub( border.mul( 0.12 ) );
+
+				} else if ( finish === 'Neon' ) {
+
+					const glowColor = name === 'Obsidian' ? color( 0x00ff9d ) : color( 0x85ff9b );
+					const view = cameraPosition.sub( positionWorld ).normalize();
+					const fresnel = normalWorldGeometry.dot( view ).abs().oneMinus().pow( 3 );
+					const glow = edge.mul( 1.4 ).add( fresnel.mul( 0.75 ) ).add( face.mul( 0.1 ) );
+					bodyColor = mix( bodyColor, glowColor, glow.mul( 0.18 ) );
+					emissiveNode = emissiveNode.add( glowColor.mul( glow.mul( 1.1 ) ) );
+					roughness = roughness.mul( 0.75 ).add( 0.05 );
+					material.clearcoat = 1;
+
+				} else if ( finish === 'Aurora' ) {
+
+					const stream = sin( positionWorld.x.mul( 2.2 ).add( positionWorld.y.mul( 5.6 ) ).add( time.mul( 0.45 ) ).add( cloudy.mul( 7 ) ) ).mul( 0.5 ).add( 0.5 );
+					const aurora = smoothstep( 0.36, 1, stream );
+					const auroraColor = mix( color( 0x35ffd3 ), color( 0x7aa8ff ), sin( positionWorld.z.mul( 1.7 ).add( time.mul( 0.2 ) ) ).mul( 0.5 ).add( 0.5 ) );
+					bodyColor = mix( bodyColor, auroraColor, aurora.mul( 0.32 ) );
+					emissiveNode = emissiveNode.add( auroraColor.mul( aurora.mul( 0.55 ) ) );
+					height = height.add( aurora.mul( 0.02 ) );
+
+				}
+
+				material.colorNode = bodyColor;
+				material.roughnessNode = roughness.clamp( 0.02, 1 );
+				material.metalnessNode = metalness;
+				material.normalNode = bumpMap( height );
+				material.emissiveNode = emissiveNode;
+
+				return material;
+
+			}
+
+			function createPipMaterial( name, finish ) {
+
+				const material = new THREE.MeshPhysicalNodeMaterial();
+				material.envMapIntensity = 2.2;
+				material.clearcoat = 1;
+				material.clearcoatRoughness = 0.015;
+				material.roughness = 0.05;
+				material.metalness = 0;
+				material.ior = 1.74;
+				material.transmission = 0.03;
+				material.thickness = 0.1;
+				material.attenuationDistance = 0.32;
+
+				const local = positionLocal;
+				const radial = length( local.xy ).div( 0.078 ).clamp( 0, 1 );
+				const depth = local.z.add( 0.025 ).mul( 16 ).clamp( 0, 1 );
+				const cells = mx_worley_noise_float( local.mul( 68 ).add( vec3( hashSeed( name, finish, 9 ) ) ) );
+				const inclusions = cells.oneMinus().pow( 7 );
+				const silk = sin( local.x.mul( 155 ).add( local.y.mul( 80 ) ).add( mx_noise_float( local.mul( 24 ) ).mul( 14 ) ) ).mul( 0.5 ).add( 0.5 ).pow( 10 );
+				const sparkle = inclusions.mul( depth.mul( 0.8 ).add( 0.25 ) ).add( silk.mul( 0.35 ) );
+				const view = cameraPosition.sub( positionWorld ).normalize();
+				const fresnel = normalWorldGeometry.dot( view ).abs().oneMinus().pow( 4 );
+
+				let baseColor;
+				let deepColor;
+				let brightColor;
+
+				if ( name === 'Prism' ) {
+
+					const oil = hue( color( 0x55ffe8 ), local.x.mul( 2.5 ).add( local.y.mul( 3.2 ) ).add( time.mul( 0.35 ) ) );
+					baseColor = mix( color( 0x061014 ), oil, fresnel.mul( 1.2 ).add( sparkle.mul( 0.55 ) ) );
+					deepColor = color( 0x020304 );
+					brightColor = oil;
+					material.metalness = 0.45;
+					material.transmission = 0.08;
+					material.iridescence = 1;
+					material.iridescenceIOR = 2.1;
+					material.iridescenceThicknessRange = [ 180, 900 ];
+					material.dispersion = 0.35;
+
+				} else {
+
+					const suit = suits[ name ];
+					baseColor = color( suit.base );
+					deepColor = color( suit.deep );
+					brightColor = color( suit.bright );
+					tempColor.set( suit.base );
+					material.attenuationColor = tempColor.clone();
+
+				}
+
+				const gemDepth = mix( deepColor, baseColor, depth );
+				const gemBody = mix( gemDepth, brightColor, radial.oneMinus().pow( 1.4 ).mul( 0.52 ).add( sparkle.mul( 0.7 ) ) );
+				let gemColor = gemBody.add( brightColor.mul( fresnel.mul( 0.22 ) ) );
+				let emissiveNode = baseColor.mul( name === 'Prism' ? 0.04 : 0.1 ).add( brightColor.mul( sparkle.mul( 0.2 ).add( radial.oneMinus().pow( 3 ).mul( 0.1 ) ) ) );
+
+				if ( finish === 'Neon' ) {
+
+					emissiveNode = emissiveNode.add( brightColor.mul( radial.oneMinus().pow( 2 ).mul( 1.35 ) ) );
+
+				} else if ( finish === 'Aurora' && name !== 'Prism' ) {
+
+					const aurora = hue( color( 0x58ffcf ), time.mul( 0.16 ).add( local.x.mul( 2.0 ) ) );
+					gemColor = mix( gemColor, aurora, fresnel.mul( 0.35 ) );
+					emissiveNode = emissiveNode.add( aurora.mul( fresnel.mul( 0.32 ) ) );
+
+				}
+
+				material.colorNode = gemColor;
+				material.roughnessNode = mx_noise_float( local.mul( 95 ) ).mul( 0.045 ).add( 0.025 ).add( inclusions.mul( 0.06 ) );
+				material.normalNode = bumpMap( inclusions.mul( 0.035 ).add( silk.mul( 0.02 ) ) );
+				material.emissiveNode = emissiveNode;
+
+				return material;
+
+			}
+
+			function createSocketMaterial( bodyName, finish ) {
+
+				const material = new THREE.MeshPhysicalNodeMaterial( {
+					roughness: 0.42,
+					metalness: bodyName === 'Gilded' ? 0.65 : 0.0
+				} );
+				const shade = mx_noise_float( positionLocal.mul( 36 ).add( vec3( hashSeed( bodyName, finish, 14 ) ) ) ).mul( 0.5 ).add( 0.5 );
+				let socketColor = mix( color( 0x090909 ), color( 0x303030 ), shade.mul( 0.45 ) );
+
+				if ( bodyName === 'Gilded' ) {
+
+					socketColor = mix( color( 0x7d4b0b ), color( 0xffcb58 ), shade.mul( 0.55 ) );
+
+				} else if ( bodyName === 'Prism' ) {
+
+					socketColor = mix( color( 0x030507 ), hue( color( 0x61fff0 ), time.mul( 0.14 ).add( positionWorld.y ) ), 0.35 );
+					material.metalness = 0.25;
+					material.iridescence = 1;
+					material.clearcoat = 1;
+
+				}
+
+				if ( finish === 'Neon' ) {
+
+					material.emissiveNode = color( 0x77ff9d ).mul( 0.35 );
+
+				}
+
+				material.colorNode = socketColor;
+				material.normalNode = bumpMap( shade.mul( 0.025 ) );
+
+				return material;
+
+			}
+
+			function createPlugMaterial( finish ) {
+
+				const material = new THREE.MeshPhysicalNodeMaterial( {
+					metalness: 0.95,
+					roughness: 0.22,
+					clearcoat: 0.35,
+					clearcoatRoughness: 0.1
+				} );
+				const rings = sin( length( positionLocal.xy ).mul( 75 ) ).mul( 0.5 ).add( 0.5 );
+				const scratches = sin( positionLocal.y.mul( 380 ).add( positionLocal.x.mul( 40 ) ) ).abs().pow( 32 );
+				let plugColor = mix( color( 0x4b4640 ), color( 0xb8afa5 ), rings.mul( 0.36 ) ).add( color( 0xffffff ).mul( scratches.mul( 0.08 ) ) );
+
+				if ( finish === 'Aurora' ) {
+
+					const aurora = hue( color( 0x58ffcf ), time.mul( 0.18 ).add( positionWorld.x ) );
+					plugColor = mix( plugColor, aurora, 0.18 );
+					material.emissiveNode = aurora.mul( 0.16 );
+
+				}
+
+				material.colorNode = plugColor;
+				material.roughnessNode = scratches.mul( 0.14 ).add( 0.14 );
+				material.normalNode = bumpMap( scratches.mul( 0.018 ).add( rings.mul( 0.012 ) ) );
+
+				return material;
+
+			}
+
+			function edgeMask() {
+
+				const ax = abs( positionLocal.x );
+				const ay = abs( positionLocal.y );
+				const az = abs( positionLocal.z );
+				return max( min( ax, ay ), max( min( ax, az ), min( ay, az ) ) ).smoothstep( 0.31, 0.5 );
+
+			}
+
+			function faceMask() {
+
+				const ax = abs( positionLocal.x );
+				const ay = abs( positionLocal.y );
+				const az = abs( positionLocal.z );
+				return max( ax, max( ay, az ) ).smoothstep( 0.43, 0.5 );
+
+			}
+
+			function etchedBorder() {
+
+				const ax = abs( positionLocal.x );
+				const ay = abs( positionLocal.y );
+				const az = abs( positionLocal.z );
+
+				const xy = max( ax, ay );
+				const xz = max( ax, az );
+				const yz = max( ay, az );
+
+				const lineXY = smoothstep( 0.335, 0.365, xy ).sub( smoothstep( 0.382, 0.418, xy ) ).mul( az.smoothstep( 0.43, 0.5 ) );
+				const lineXZ = smoothstep( 0.335, 0.365, xz ).sub( smoothstep( 0.382, 0.418, xz ) ).mul( ay.smoothstep( 0.43, 0.5 ) );
+				const lineYZ = smoothstep( 0.335, 0.365, yz ).sub( smoothstep( 0.382, 0.418, yz ) ).mul( ax.smoothstep( 0.43, 0.5 ) );
+
+				const corners = mx_worley_noise_float( positionLocal.mul( 22 ).add( vec3( 12 ) ) ).oneMinus().pow( 4 );
+				return max( lineXY, max( lineXZ, lineYZ ) ).mul( 0.75 ).add( corners.mul( 0.08 ) ).clamp( 0, 1 );
+
+			}
+
+			function addPips( group, pipMaterial, socketMaterial ) {
+
+				const pipGeometry = getPipGeometry();
+				const socketGeometry = getSocketGeometry();
+				const pipCount = 21;
+				const socketMesh = new THREE.InstancedMesh( socketGeometry, socketMaterial, pipCount );
+				const pipMesh = new THREE.InstancedMesh( pipGeometry, pipMaterial, pipCount );
+				const socketMatrix = new THREE.Matrix4();
+				const pipMatrix = new THREE.Matrix4();
+				const scale = new THREE.Vector3( 1, 1, 1 );
+				let index = 0;
+
+				for ( const face of faceDefinitions ) {
+
+					const positions = getPipPositions( face.count );
+
+					for ( const point of positions ) {
+
+						const facePosition = tempVector.copy( face.normal ).multiplyScalar( 0.507 )
+							.addScaledVector( face.u, point.x )
+							.addScaledVector( face.v, point.y );
+
+						pipQuaternion.setFromUnitVectors( up, face.normal );
+
+						socketMatrix.compose( facePosition.clone().addScaledVector( face.normal, 0.001 ), pipQuaternion, scale );
+						pipMatrix.compose( facePosition.clone().addScaledVector( face.normal, 0.02 ), pipQuaternion, scale );
+
+						socketMesh.setMatrixAt( index, socketMatrix );
+						pipMesh.setMatrixAt( index, pipMatrix );
+						index ++;
+
+					}
+
+				}
+
+				socketMesh.castShadow = true;
+				socketMesh.receiveShadow = true;
+				socketMesh.userData.die = group;
+				socketMesh.instanceMatrix.needsUpdate = true;
+				group.add( socketMesh );
+				pickMeshes.push( socketMesh );
+
+				pipMesh.castShadow = true;
+				pipMesh.receiveShadow = true;
+				pipMesh.userData.die = group;
+				pipMesh.instanceMatrix.needsUpdate = true;
+				group.add( pipMesh );
+				pickMeshes.push( pipMesh );
+
+			}
+
+			function addLoadedPlug( group, finish ) {
+
+				const plug = new THREE.Mesh( getPlugGeometry(), getPlugMaterial( finish ) );
+				const normal = new THREE.Vector3( 1, 0, 0 );
+				const u = new THREE.Vector3( 0, 0, - 1 );
+				const v = new THREE.Vector3( 0, 1, 0 );
+
+				plug.position.copy( normal ).multiplyScalar( 0.53 )
+					.addScaledVector( u, 0.26 )
+					.addScaledVector( v, - 0.12 );
+				plug.quaternion.setFromUnitVectors( up, normal );
+				plug.castShadow = true;
+				plug.receiveShadow = true;
+				plug.userData.die = group;
+				group.add( plug );
+				pickMeshes.push( plug );
+
+			}
+
+			function getPipPositions( count ) {
+
+				const d = 0.23;
+
+				if ( count === 1 ) return [ new THREE.Vector2( 0, 0 ) ];
+				if ( count === 2 ) return [ new THREE.Vector2( - d, - d ), new THREE.Vector2( d, d ) ];
+				if ( count === 3 ) return [ new THREE.Vector2( - d, - d ), new THREE.Vector2( 0, 0 ), new THREE.Vector2( d, d ) ];
+				if ( count === 4 ) return [ new THREE.Vector2( - d, - d ), new THREE.Vector2( d, - d ), new THREE.Vector2( - d, d ), new THREE.Vector2( d, d ) ];
+				if ( count === 5 ) return [ new THREE.Vector2( - d, - d ), new THREE.Vector2( d, - d ), new THREE.Vector2( 0, 0 ), new THREE.Vector2( - d, d ), new THREE.Vector2( d, d ) ];
+
+				return [
+					new THREE.Vector2( - d, - d ),
+					new THREE.Vector2( d, - d ),
+					new THREE.Vector2( - d, 0 ),
+					new THREE.Vector2( d, 0 ),
+					new THREE.Vector2( - d, d ),
+					new THREE.Vector2( d, d )
+				];
+
+			}
+
+			function createDieBodyGeometry( size, radius, segments ) {
+
+				const totalSegments = segments * 2 + 1;
+				const geometry = new THREE.BoxGeometry( 1, 1, 1, totalSegments, totalSegments, totalSegments ).toNonIndexed();
+				const position = new THREE.Vector3();
+				const normal = new THREE.Vector3();
+				const halfSegmentSize = 0.5 / totalSegments;
+				const box = new THREE.Vector3( size, size, size ).multiplyScalar( 0.5 ).subScalar( radius );
+
+				const positions = geometry.attributes.position.array;
+				const normals = geometry.attributes.normal.array;
+
+				for ( let i = 0; i < positions.length; i += 3 ) {
+
+					position.fromArray( positions, i );
+					normal.copy( position );
+					normal.x -= Math.sign( normal.x ) * halfSegmentSize;
+					normal.y -= Math.sign( normal.y ) * halfSegmentSize;
+					normal.z -= Math.sign( normal.z ) * halfSegmentSize;
+					normal.normalize();
+
+					positions[ i ] = box.x * Math.sign( position.x ) + normal.x * radius;
+					positions[ i + 1 ] = box.y * Math.sign( position.y ) + normal.y * radius;
+					positions[ i + 2 ] = box.z * Math.sign( position.z ) + normal.z * radius;
+
+					normals[ i ] = normal.x;
+					normals[ i + 1 ] = normal.y;
+					normals[ i + 2 ] = normal.z;
+
+				}
+
+				geometry.computeBoundingSphere();
+
+				return geometry;
+
+			}
+
+			function getDieBodyGeometry() {
+
+				if ( sharedGeometries.body === undefined ) {
+
+					sharedGeometries.body = createDieBodyGeometry( 1, 0.16, 8 );
+
+				}
+
+				return sharedGeometries.body;
+
+			}
+
+			function getPipGeometry() {
+
+				if ( sharedGeometries.pip === undefined ) {
+
+					sharedGeometries.pip = createGemPipGeometry( 0.094, 0.043, 40, 8 );
+
+				}
+
+				return sharedGeometries.pip;
+
+			}
+
+			function getSocketGeometry() {
+
+				if ( sharedGeometries.socket === undefined ) {
+
+					sharedGeometries.socket = createInsetRingGeometry( 0.097, 0.126, 0.018, 56 );
+
+				}
+
+				return sharedGeometries.socket;
+
+			}
+
+			function getPlugGeometry() {
+
+				if ( sharedGeometries.plug === undefined ) {
+
+					sharedGeometries.plug = createInsetDiscGeometry( 0.155, 0.028, 64 );
+
+				}
+
+				return sharedGeometries.plug;
+
+			}
+
+			function createGemPipGeometry( radius, height, segments, rings ) {
+
+				const positions = [];
+				const indices = [];
+
+				positions.push( 0, 0, height );
+
+				for ( let ring = 1; ring <= rings; ring ++ ) {
+
+					const t = ring / rings;
+					const ringRadius = radius * t;
+					const z = height * ( 1 - t * t ) - 0.008 * t;
+
+					for ( let i = 0; i < segments; i ++ ) {
+
+						const angle = i / segments * Math.PI * 2;
+						positions.push( Math.cos( angle ) * ringRadius, Math.sin( angle ) * ringRadius, z );
+
+					}
+
+				}
+
+				for ( let i = 0; i < segments; i ++ ) {
+
+					indices.push( 0, 1 + ( i + 1 ) % segments, 1 + i );
+
+				}
+
+				for ( let ring = 1; ring < rings; ring ++ ) {
+
+					const a = 1 + ( ring - 1 ) * segments;
+					const b = 1 + ring * segments;
+
+					for ( let i = 0; i < segments; i ++ ) {
+
+						const next = ( i + 1 ) % segments;
+						indices.push( a + i, a + next, b + next );
+						indices.push( a + i, b + next, b + i );
+
+					}
+
+				}
+
+				const baseStart = positions.length / 3;
+				for ( let i = 0; i < segments; i ++ ) {
+
+					const angle = i / segments * Math.PI * 2;
+					positions.push( Math.cos( angle ) * radius * 0.92, Math.sin( angle ) * radius * 0.92, - 0.022 );
+
+				}
+
+				const outer = 1 + ( rings - 1 ) * segments;
+				for ( let i = 0; i < segments; i ++ ) {
+
+					const next = ( i + 1 ) % segments;
+					indices.push( outer + i, outer + next, baseStart + next );
+					indices.push( outer + i, baseStart + next, baseStart + i );
+
+				}
+
+				const geometry = new THREE.BufferGeometry();
+				geometry.setAttribute( 'position', new THREE.Float32BufferAttribute( positions, 3 ) );
+				geometry.setIndex( indices );
+				geometry.computeVertexNormals();
+				geometry.computeBoundingSphere();
+
+				return geometry;
+
+			}
+
+			function createInsetDiscGeometry( radius, depth, segments ) {
+
+				const positions = [ 0, 0, - depth ];
+				const indices = [];
+
+				for ( let i = 0; i < segments; i ++ ) {
+
+					const angle = i / segments * Math.PI * 2;
+					positions.push( Math.cos( angle ) * radius * 0.82, Math.sin( angle ) * radius * 0.82, - depth );
+
+				}
+
+				const outerStart = positions.length / 3;
+				for ( let i = 0; i < segments; i ++ ) {
+
+					const angle = i / segments * Math.PI * 2;
+					positions.push( Math.cos( angle ) * radius, Math.sin( angle ) * radius, 0 );
+
+				}
+
+				for ( let i = 0; i < segments; i ++ ) {
+
+					const next = ( i + 1 ) % segments;
+					indices.push( 0, 1 + i, 1 + next );
+					indices.push( 1 + i, outerStart + i, outerStart + next );
+					indices.push( 1 + i, outerStart + next, 1 + next );
+
+				}
+
+				const geometry = new THREE.BufferGeometry();
+				geometry.setAttribute( 'position', new THREE.Float32BufferAttribute( positions, 3 ) );
+				geometry.setIndex( indices );
+				geometry.computeVertexNormals();
+				geometry.computeBoundingSphere();
+
+				return geometry;
+
+			}
+
+			function createInsetRingGeometry( innerRadius, outerRadius, depth, segments ) {
+
+				const positions = [];
+				const indices = [];
+
+				for ( let i = 0; i < segments; i ++ ) {
+
+					const angle = i / segments * Math.PI * 2;
+					positions.push( Math.cos( angle ) * innerRadius, Math.sin( angle ) * innerRadius, - depth );
+
+				}
+
+				const bevelStart = positions.length / 3;
+				for ( let i = 0; i < segments; i ++ ) {
+
+					const angle = i / segments * Math.PI * 2;
+					positions.push( Math.cos( angle ) * ( innerRadius + outerRadius ) * 0.5, Math.sin( angle ) * ( innerRadius + outerRadius ) * 0.5, - depth * 0.45 );
+
+				}
+
+				const outerStart = positions.length / 3;
+				for ( let i = 0; i < segments; i ++ ) {
+
+					const angle = i / segments * Math.PI * 2;
+					positions.push( Math.cos( angle ) * outerRadius, Math.sin( angle ) * outerRadius, 0 );
+
+				}
+
+				for ( let i = 0; i < segments; i ++ ) {
+
+					const next = ( i + 1 ) % segments;
+					indices.push( i, next, bevelStart + next );
+					indices.push( i, bevelStart + next, bevelStart + i );
+					indices.push( bevelStart + i, bevelStart + next, outerStart + next );
+					indices.push( bevelStart + i, outerStart + next, outerStart + i );
+
+				}
+
+				const geometry = new THREE.BufferGeometry();
+				geometry.setAttribute( 'position', new THREE.Float32BufferAttribute( positions, 3 ) );
+				geometry.setIndex( indices );
+				geometry.computeVertexNormals();
+				geometry.computeBoundingSphere();
+
+				return geometry;
+
+			}
+
+			function createLabel( text, home ) {
+
+				const canvas = document.createElement( 'canvas' );
+				canvas.width = 512;
+				canvas.height = 160;
+
+				const context = canvas.getContext( '2d' );
+				context.clearRect( 0, 0, canvas.width, canvas.height );
+				context.font = '700 64px Inter, Segoe UI, sans-serif';
+				context.textAlign = 'center';
+				context.textBaseline = 'middle';
+				context.lineJoin = 'round';
+				context.strokeStyle = 'rgba(0, 0, 0, 0.78)';
+				context.lineWidth = 10;
+				context.strokeText( text, 256, 82 );
+				context.fillStyle = '#f5f0e8';
+				context.fillText( text, 256, 82 );
+
+				const texture = new THREE.CanvasTexture( canvas );
+				texture.colorSpace = THREE.SRGBColorSpace;
+				texture.minFilter = THREE.LinearFilter;
+
+				const material = new THREE.MeshBasicMaterial( {
+					map: texture,
+					transparent: true,
+					depthWrite: false
+				} );
+
+				const label = new THREE.Mesh( new THREE.PlaneGeometry( 1.55, 0.44 ), material );
+				label.position.set( home.x, 0.03, home.z + 0.82 );
+				label.rotation.x = - Math.PI / 2;
+				label.renderOrder = 2;
+
+				return label;
+
+			}
+
+			function hashSeed( name, finish, offset ) {
+
+				let hash = offset * 97;
+				const text = `${ name }-${ finish || 'none' }`;
+
+				for ( let i = 0; i < text.length; i ++ ) {
+
+					hash = ( hash * 31 + text.charCodeAt( i ) ) % 9973;
+
+				}
+
+				return hash * 0.013;
+
+			}
+
+			function onClick( event ) {
+
+				pointer.x = event.clientX / window.innerWidth * 2 - 1;
+				pointer.y = - ( event.clientY / window.innerHeight ) * 2 + 1;
+
+				raycaster.setFromCamera( pointer, camera );
+
+				const intersects = raycaster.intersectObjects( pickMeshes, false );
+
+				if ( intersects.length > 0 ) {
+
+					selectDie( intersects[ 0 ].object.userData.die.userData.dieData );
+
+				} else {
+
+					selectDie( null );
+
+				}
+
+			}
+
+			function selectDie( die ) {
+
+				if ( selectedDie === die ) {
+
+					die = null;
+
+				}
+
+				selectedDie = die;
+				cameraStart.copy( camera.position );
+				targetStart.copy( controls.target );
+				cameraEnd.copy( selectedDie ? focusCamera : overviewCamera );
+				targetEnd.copy( selectedDie ? focusTarget : overviewTarget );
+				focusTransition = 0;
+
+			}
+
+			function animate() {
+
+				timer.update();
+				const delta = timer.getDelta();
+				const lerpAmount = 1 - Math.pow( 0.0001, delta );
+
+				for ( const die of dice ) {
+
+					const focused = die === selectedDie;
+					const targetPosition = focused ? focusPosition : die.home;
+					const targetScale = focused ? focusScale : die.scale;
+
+					die.group.position.lerp( targetPosition, lerpAmount );
+					die.group.scale.lerp( targetScale, lerpAmount );
+
+					if ( focused ) {
+
+						die.group.rotation.y += delta * 0.35;
+
+					} else {
+
+						die.group.rotation.y = THREE.MathUtils.lerp( die.group.rotation.y, die.group.userData.homeRotationY, lerpAmount );
+
+					}
+
+					die.label.material.opacity = THREE.MathUtils.lerp(
+						die.label.material.opacity,
+						selectedDie === null || focused ? 1 : 0.3,
+						lerpAmount
+					);
+
+				}
+
+				if ( focusTransition < 1 ) {
+
+					focusTransition = Math.min( focusTransition + delta * 1.8, 1 );
+					const t = focusTransition * focusTransition * ( 3 - 2 * focusTransition );
+					camera.position.lerpVectors( cameraStart, cameraEnd, t );
+					controls.target.lerpVectors( targetStart, targetEnd, t );
+
+				}
+
+				controls.update();
+				renderer.render( scene, camera );
+
+			}
+
+			function onWindowResize() {
+
+				camera.aspect = window.innerWidth / window.innerHeight;
+				camera.updateProjectionMatrix();
+
+				renderer.setSize( window.innerWidth, window.innerHeight );
+
+			}
+
+		</script>
+	</body>
+</html>
