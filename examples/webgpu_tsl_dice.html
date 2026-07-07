@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html lang="en">
+	<head>
+		<title>three.js webgpu - tsl dice</title>
+		<meta charset="utf-8">
+		<meta name="viewport" content="width=device-width, user-scalable=no, minimum-scale=1.0, maximum-scale=1.0">
+		<meta property="og:title" content="three.js webgpu - tsl dice">
+		<meta property="og:type" content="website">
+		<meta property="og:url" content="https://threejs.org/examples/webgpu_tsl_dice.html">
+		<meta property="og:image" content="https://threejs.org/examples/screenshots/webgpu_tsl_dice.jpg">
+		<link type="text/css" rel="stylesheet" href="example.css">
+		<style>
+
+			body {
+				background: #080808;
+				color: #d8d8d8;
+			}
+
+			#info span {
+				color: #9fd6ff;
+			}
+
+		</style>
+	</head>
+	<body>
+
+		<div id="info">
+			<a href="https://threejs.org/" target="_blank" rel="noopener" class="logo-link"></a>
+
+			<div class="title-wrapper">
+				<a href="https://threejs.org/" target="_blank" rel="noopener">three.js</a><span>Collectible Dice Materials</span>
+			</div>
+
+			<small>
+				Procedural WebGPU TSL dice for a roguelike — click any die to inspect it.
+			</small>
+		</div>
+
+		<script type="importmap">
+			{
+				"imports": {
+					"three": "../build/three.webgpu.js",
+					"three/webgpu": "../build/three.webgpu.js",
+					"three/tsl": "../build/three.tsl.js",
+					"three/addons/": "./jsm/"
+				}
+			}
+		</script>
+
+		<script type="module">
+
+			import * as THREE from 'three/webgpu';
+			import { float, Fn, length, max, mix, positionWorld, smoothstep, vec3, vec4 } from 'three/tsl';
+
+			import WebGPU from 'three/addons/capabilities/WebGPU.js';
+			import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+			import { HDRLoader } from 'three/addons/loaders/HDRLoader.js';
+			import { FontLoader } from 'three/addons/loaders/FontLoader.js';
+			import { TextGeometry } from 'three/addons/geometries/TextGeometry.js';
+			import { createDiceGeometry } from 'three/addons/geometries/DiceGeometry.js';
+			import { createDiceMaterials } from 'three/addons/materials/DiceNodeMaterials.js';
+
+			const GRID = { cols: 5, spacing: 1.45 };
+			const FOCUS = {
+				position: new THREE.Vector3( 0, 0.85, 2.35 ),
+				scale: 1.65,
+				dim: 0.35
+			};
+
+			let scene, camera, renderer, controls, font;
+			let diceEntries = [];
+			let focusedEntry = null;
+			let focusAmount = 0;
+
+			const raycaster = new THREE.Raycaster();
+			const pointer = new THREE.Vector2();
+
+			const DICE_SPECS = [
+				{ label: 'Emerald', suit: 'emerald', body: 'ceramic' },
+				{ label: 'Ruby', suit: 'ruby', body: 'ceramic' },
+				{ label: 'Sapphire', suit: 'sapphire', body: 'ceramic' },
+				{ label: 'Amethyst', suit: 'amethyst', body: 'ceramic' },
+
+				{ label: 'Chalk', suit: 'emerald', body: 'chalk' },
+				{ label: 'Ivory', suit: 'emerald', body: 'ivory' },
+				{ label: 'Crystal', suit: 'emerald', body: 'crystal' },
+				{ label: 'Obsidian', suit: 'emerald', body: 'obsidian' },
+				{ label: 'Lead', body: 'lead', pips: false },
+				{ label: 'Gilded', suit: 'emerald', body: 'gilded' },
+				{ label: 'Loaded', suit: 'emerald', body: 'loaded', loadedPlug: true },
+				{ label: 'Prism', body: 'prism' },
+
+				{ label: 'Etched', suit: 'emerald', body: 'ceramic', finish: 'etched' },
+				{ label: 'Neon', suit: 'emerald', body: 'ceramic', finish: 'neon' },
+				{ label: 'Aurora', suit: 'emerald', body: 'ceramic', finish: 'aurora' },
+
+				{ label: 'Obsidian Neon', suit: 'emerald', body: 'obsidian', finish: 'neon' },
+				{ label: 'Crystal Etched', suit: 'emerald', body: 'crystal', finish: 'etched' },
+				{ label: 'Gilded Aurora', suit: 'emerald', body: 'gilded', finish: 'aurora' },
+				{ label: 'Ivory Neon', suit: 'emerald', body: 'ivory', finish: 'neon' },
+				{ label: 'Chalk Etched', suit: 'emerald', body: 'chalk', finish: 'etched' },
+				{ label: 'Loaded Aurora', suit: 'emerald', body: 'loaded', finish: 'aurora', loadedPlug: true },
+				{ label: 'Prism Neon', body: 'prism', finish: 'neon' },
+				{ label: 'Obsidian Etched', suit: 'emerald', body: 'obsidian', finish: 'etched' }
+			];
+
+			function gridPosition( index ) {
+
+				const row = Math.floor( index / GRID.cols );
+				const col = index % GRID.cols;
+				const rows = Math.ceil( DICE_SPECS.length / GRID.cols );
+
+				return new THREE.Vector3(
+					( col - ( GRID.cols - 1 ) / 2 ) * GRID.spacing,
+					0,
+					( row - ( rows - 1 ) / 2 ) * GRID.spacing
+				);
+
+			}
+
+			function createDisplaySurface() {
+
+				const material = new THREE.MeshPhysicalNodeMaterial();
+				const fade = Fn( ( [ radius = float( 18.0 ), falloff = float( 8.0 ) ] ) => {
+
+					return smoothstep( radius, radius.sub( falloff ), length( positionWorld.xz ) );
+
+				} );
+
+				const sheen = Fn( () => {
+
+					const n = positionWorld.xz.mul( 0.35 );
+					return max( 0.0, mix( 0.08, 0.22, smoothstep( 0.0, 1.0, length( n ) ) ) );
+
+				} );
+
+				material.colorNode = mix( vec3( 0.03 ), vec3( 0.12 ), sheen() ).mul( fade( 18.0, 10.0 ) );
+				material.roughnessNode = float( 0.18 );
+				material.metalnessNode = float( 0.35 );
+				material.clearcoatNode = float( 1.0 );
+				material.clearcoatRoughnessNode = float( 0.08 );
+
+				const mesh = new THREE.Mesh( new THREE.CircleGeometry( 24, 96 ), material );
+				mesh.rotation.x = - Math.PI / 2;
+				mesh.position.y = - 0.62;
+				mesh.receiveShadow = true;
+
+				return mesh;
+
+			}
+
+			function createLabel( text, position ) {
+
+				const geometry = new TextGeometry( text, {
+					font: font,
+					size: 0.11,
+					depth: 0.001,
+					curveSegments: 8,
+					bevelEnabled: false
+				} );
+
+				geometry.computeBoundingBox();
+				geometry.translate(
+					- 0.5 * ( geometry.boundingBox.max.x - geometry.boundingBox.min.x ),
+					- 0.5 * ( geometry.boundingBox.max.y - geometry.boundingBox.min.y ),
+					- 0.5 * ( geometry.boundingBox.max.z - geometry.boundingBox.min.z )
+				);
+
+				const material = new THREE.MeshBasicNodeMaterial();
+				material.colorNode = vec4( vec3( 0.78 ), float( 0.92 ) );
+				material.transparent = true;
+
+				const mesh = new THREE.Mesh( geometry, material );
+				mesh.position.copy( position );
+				mesh.position.y = - 0.48;
+				mesh.rotation.x = - Math.PI * 0.42;
+
+				return mesh;
+
+			}
+
+			function buildDiceMesh( spec ) {
+
+				const geometry = createDiceGeometry( {
+					size: 0.72,
+					pips: spec.pips !== false,
+					loadedPlug: spec.loadedPlug === true
+				} );
+
+				const materials = createDiceMaterials( {
+					suit: spec.suit,
+					body: spec.body,
+					finish: spec.finish || null
+				} );
+
+				let meshMaterials;
+
+				if ( spec.body === 'lead' ) {
+
+					meshMaterials = materials.body;
+
+				} else if ( spec.loadedPlug ) {
+
+					meshMaterials = [ materials.body, materials.pip, materials.plug ];
+
+				} else {
+
+					meshMaterials = [ materials.body, materials.pip ];
+
+				}
+
+				const mesh = new THREE.Mesh( geometry, meshMaterials );
+				mesh.castShadow = true;
+				mesh.receiveShadow = true;
+
+				return mesh;
+
+			}
+
+			function createDieEntry( spec, index ) {
+
+				const root = new THREE.Group();
+				const home = gridPosition( index );
+				root.position.copy( home );
+				root.rotation.set( 0.35, index * 0.31, 0.18 );
+
+				const mesh = buildDiceMesh( spec );
+				root.add( mesh );
+
+				const label = createLabel( spec.label, new THREE.Vector3( 0, 0, 0 ) );
+				root.add( label );
+
+				root.userData = {
+					home,
+					homeRotation: root.rotation.clone(),
+					mesh,
+					label,
+					spec
+				};
+
+				return root;
+
+			}
+
+			function setFocus( entry ) {
+
+				if ( focusedEntry === entry ) {
+
+					focusedEntry = null;
+					return;
+
+				}
+
+				focusedEntry = entry;
+
+			}
+
+			function onPointerDown( event ) {
+
+				pointer.x = ( event.clientX / window.innerWidth ) * 2 - 1;
+				pointer.y = - ( event.clientY / window.innerHeight ) * 2 + 1;
+
+				raycaster.setFromCamera( pointer, camera );
+
+				const meshes = diceEntries.map( ( entry ) => entry.userData.mesh );
+				const hits = raycaster.intersectObjects( meshes, false );
+
+				if ( hits.length > 0 ) {
+
+					const hitMesh = hits[ 0 ].object;
+					const entry = diceEntries.find( ( item ) => item.userData.mesh === hitMesh );
+					setFocus( entry );
+
+				} else {
+
+					setFocus( null );
+
+				}
+
+			}
+
+			function updateFocus( delta ) {
+
+				const target = focusedEntry ? 1 : 0;
+				focusAmount = THREE.MathUtils.damp( focusAmount, target, 4, delta );
+
+				for ( const entry of diceEntries ) {
+
+					const isFocused = entry === focusedEntry;
+					const focusBlend = isFocused ? focusAmount : 0;
+					const dimBlend = focusedEntry && ! isFocused ? focusAmount : 0;
+
+					entry.position.lerpVectors( entry.userData.home, FOCUS.position, focusBlend );
+					entry.scale.setScalar( THREE.MathUtils.lerp( THREE.MathUtils.lerp( 1, FOCUS.scale, focusBlend ), 0.88, dimBlend ) );
+
+					entry.rotation.x = THREE.MathUtils.lerp( entry.userData.homeRotation.x, 0.15, focusBlend );
+					entry.rotation.y = THREE.MathUtils.lerp( entry.userData.homeRotation.y, entry.userData.homeRotation.y + 0.6, focusBlend );
+					entry.rotation.z = THREE.MathUtils.lerp( entry.userData.homeRotation.z, 0, focusBlend );
+
+					const opacity = THREE.MathUtils.lerp( 1, FOCUS.dim, dimBlend );
+					entry.userData.label.material.opacity = opacity;
+					entry.userData.label.lookAt( camera.position );
+
+				}
+
+			}
+
+			async function init() {
+
+				scene = new THREE.Scene();
+				scene.background = new THREE.Color( 0x101014 );
+				scene.fog = new THREE.Fog( 0x101014, 12, 28 );
+
+				camera = new THREE.PerspectiveCamera( 42, window.innerWidth / window.innerHeight, 0.1, 100 );
+				camera.position.set( 0.2, 5.8, 8.8 );
+
+				renderer = new THREE.WebGPURenderer( { antialias: true } );
+				renderer.setPixelRatio( Math.min( window.devicePixelRatio, 2 ) );
+				renderer.setSize( window.innerWidth, window.innerHeight );
+				renderer.toneMapping = THREE.NeutralToneMapping;
+				renderer.toneMappingExposure = 1.05;
+				renderer.shadowMap.enabled = true;
+				renderer.setAnimationLoop( animate );
+				document.body.appendChild( renderer.domElement );
+
+				await renderer.init();
+
+				controls = new OrbitControls( camera, renderer.domElement );
+				controls.enableDamping = true;
+				controls.target.set( 0, 0, 0 );
+				controls.minDistance = 3.5;
+				controls.maxDistance = 18;
+				controls.maxPolarAngle = Math.PI * 0.49;
+
+				const key = new THREE.DirectionalLight( 0xffffff, 2.4 );
+				key.position.set( 4, 8, 5 );
+				key.castShadow = true;
+				key.shadow.mapSize.set( 1024, 1024 );
+				key.shadow.camera.near = 1;
+				key.shadow.camera.far = 20;
+				key.shadow.camera.left = - 8;
+				key.shadow.camera.right = 8;
+				key.shadow.camera.top = 8;
+				key.shadow.camera.bottom = - 8;
+				scene.add( key );
+
+				const fill = new THREE.DirectionalLight( 0xbadfff, 0.55 );
+				fill.position.set( - 6, 3, - 2 );
+				scene.add( fill );
+
+				const rim = new THREE.DirectionalLight( 0xffd6a8, 0.35 );
+				rim.position.set( 0, 2, - 8 );
+				scene.add( rim );
+
+				scene.add( createDisplaySurface() );
+
+				const environment = await new HDRLoader().setPath( 'textures/equirectangular/' ).loadAsync( 'monochrome_studio_02_1k.hdr' );
+				environment.mapping = THREE.EquirectangularReflectionMapping;
+				scene.environment = environment;
+				scene.environmentIntensity = 1.35;
+				scene.environmentRotation.y = 0.35;
+
+				font = await new FontLoader().loadAsync( './fonts/helvetiker_regular.typeface.json' );
+
+				diceEntries = DICE_SPECS.map( ( spec, index ) => {
+
+					const entry = createDieEntry( spec, index );
+					scene.add( entry );
+					return entry;
+
+				} );
+
+				window.addEventListener( 'resize', onWindowResize );
+				renderer.domElement.addEventListener( 'pointerdown', onPointerDown );
+
+			}
+
+			function onWindowResize() {
+
+				camera.aspect = window.innerWidth / window.innerHeight;
+				camera.updateProjectionMatrix();
+				renderer.setSize( window.innerWidth, window.innerHeight );
+
+			}
+
+			const clock = new THREE.Clock();
+
+			function animate() {
+
+				const delta = clock.getDelta();
+
+				controls.update();
+				updateFocus( delta );
+
+				renderer.render( scene, camera );
+
+			}
+
+			if ( WebGPU.isAvailable() ) {
+
+				init();
+
+			} else {
+
+				document.body.appendChild( WebGPU.getErrorMessage() );
+
+			}
+
+		</script>
+	</body>
+</html>
