@@ -723,7 +723,7 @@
 
 					const cloud = smoothstep( 0.32, 0.85, fbm( p.mul( 4.1 ).add( 8.2 ), 4 ).mul( 0.5 ).add( 0.5 ) );
 					const wisp = fbm( p.add( refracted.mul( 0.16 ) ).mul( 5.5 ).add( 2.7 ) ).abs().oneMinus().pow( 3 );
-					const sparkle = mx_worley_noise_float( p.add( refracted.mul( 0.1 ) ).mul( 70 ).add( 4.4 ) ).oneMinus().pow( 20 );
+					const sparkle = mx_noise_float( p.add( refracted.mul( 0.1 ) ).mul( 90 ).add( 4.4 ) ).max( 0 ).mul( mx_noise_float( p.add( refracted.mul( 0.1 ) ).mul( 145 ).add( 9.9 ) ).max( 0 ) ).pow( 3 ).mul( 8 ).clamp();
 
 					surf.color = mix( color( 0xffffff ), color( 0xe3edf4 ), cloud.mul( 0.5 ) );
 					surf.roughness = float( 0.02 ).add( cloud.mul( 0.28 ) );
@@ -744,13 +744,15 @@
 
 					const flow = fbm( vec3( p.x.mul( 2.4 ), p.y.mul( 7 ), p.z.mul( 2.4 ) ).add( 15.5 ) );
 					const smoke = fbm( p.add( refracted.mul( 0.14 ) ).mul( 3.6 ).add( 9.1 ) ).mul( 0.5 ).add( 0.5 );
-					const glint = mx_worley_noise_float( p.add( refracted.mul( 0.08 ) ).mul( 34 ).add( 1.2 ) ).oneMinus().pow( 30 );
+					const glintA = mx_noise_float( p.add( refracted.mul( 0.08 ) ).mul( 70 ).add( 1.2 ) );
+					const glintB = mx_noise_float( p.add( refracted.mul( 0.08 ) ).mul( 113 ).add( 8.8 ) );
+					const glint = glintA.max( 0 ).mul( glintB.max( 0 ) ).pow( 3 ).mul( 5 ).clamp();
 
 					surf.color = mix( color( 0x0b0b0e ), color( 0x16171d ), flow.mul( 0.5 ).add( 0.5 ).mul( 0.45 ) );
 					surf.roughness = float( 0.04 ).add( flow.abs().mul( 0.03 ) ).sub( bevel.mul( 0.02 ) ).clamp( 0.02, 1 );
 					surf.clearcoat = float( 1 );
 					surf.clearcoatRoughness = float( 0.02 );
-					surf.emissive = color( 0x99a3b8 ).mul( smoke.mul( smoke ) ).mul( 0.03 ).add( color( 0xcfd8e8 ).mul( glint ).mul( 0.06 ) );
+					surf.emissive = color( 0x99a3b8 ).mul( smoke.mul( smoke ) ).mul( 0.03 ).add( color( 0xcfd8e8 ).mul( glint ).mul( 0.1 ) );
 					surf.aoStrength = 0.6;
 					surf.props = { envMapIntensity: 1.0 };
 					surf.height.push( ( q ) => sin( fbm( q.mul( 3 ), 2 ).mul( 7 ).add( q.dot( vec3( 2.2, 5.1, 3.4 ) ) ) ) );
@@ -1001,17 +1003,23 @@
 					const depthMix = veilNear.mul( 0.6 ).add( veilFar.mul( 0.4 ) );
 
 					const zoning = sin( depthMix.mul( 7 ).add( seed.mul( 20 ) ) ).mul( 0.5 ).add( 0.5 );
-					const inclusions = smoothstep( 0.02, 0.16, mx_worley_noise_float( localPos.mul( 52 ).add( noiseOffset ) ) ).oneMinus().mul( 0.5 );
-					const sparkle = mx_worley_noise_float( localPos.add( refracted.mul( 0.08 ) ).mul( 95 ).add( noiseOffset ) ).oneMinus().pow( 24 );
+
+					// silky veils and jagged twinkling glints - the product of two
+					// decorrelated noises keeps the sparkle from reading as round decals
+
+					const silk = smoothstep( 0.4, 0.8, fbm( localPos.mul( 30 ).add( noiseOffset ), 2 ).mul( 0.5 ).add( 0.5 ) ).mul( 0.35 );
+					const glintA = mx_noise_float( localPos.add( refracted.mul( 0.08 ) ).mul( 150 ).add( noiseOffset ) );
+					const glintB = mx_noise_float( localPos.add( refracted.mul( 0.08 ) ).mul( 242 ).add( noiseOffset.mul( 1.7 ) ) );
+					const sparkle = glintA.max( 0 ).mul( glintB.max( 0 ) ).pow( 3 ).mul( 10 ).clamp();
 
 					const interior = mix( deep, core, smoothstep( 0.15, 0.85, depthMix ) ).mul( zoning.mul( 0.3 ).add( 0.8 ) );
 					const through = pmremTexture( envMap, refracted, float( 0.22 ) ).mul( core ).mul( facing.mul( 0.7 ).add( 0.3 ) );
 
-					material.colorNode = mix( deep, core, depthMix.mul( 0.5 ) ).mul( 0.45 ).mul( inclusions.oneMinus() );
+					material.colorNode = mix( deep, core, depthMix.mul( 0.5 ) ).mul( 0.45 ).mul( silk.oneMinus() );
 					material.emissiveNode = through.mul( 0.32 )
 						.add( interior.mul( depthMix ).mul( 0.45 ).mul( facing ) )
 						.add( glowColor.mul( rim ).mul( 0.22 ) )
-						.mul( inclusions.mul( 0.7 ).oneMinus() )
+						.mul( silk.mul( 0.7 ).oneMinus() )
 						.add( mix( color( 0xffffff ), glowColor, 0.35 ).mul( sparkle ).mul( 0.7 ) );
 					material.roughnessNode = float( 0.09 ).add( veilNear.mul( 0.04 ) );
 					material.ior = suit.ior;
