@@ -1,0 +1,3650 @@
+<!DOCTYPE html>
+<html lang="en">
+	<head>
+		<title>three.js webgpu - tsl - dice lab</title>
+		<meta charset="utf-8">
+		<meta name="viewport" content="width=device-width, user-scalable=no, minimum-scale=1.0, maximum-scale=1.0">
+		<meta property="og:title" content="three.js webgpu - tsl - dice lab">
+		<meta property="og:type" content="website">
+		<meta property="og:url" content="https://threejs.org/examples/webgpu_tsl_dice_lab.html">
+		<meta property="og:image" content="https://threejs.org/examples/screenshots/webgpu_tsl_dice_lab.jpg">
+		<link type="text/css" rel="stylesheet" href="example.css">
+	</head>
+	<body>
+
+		<div id="info">
+			<a href="https://threejs.org/" target="_blank" rel="noopener" class="logo-link"></a>
+
+			<div class="title-wrapper">
+				<a href="https://threejs.org/" target="_blank" rel="noopener">three.js</a><span>Procedural Dice Lab</span>
+			</div>
+
+			<small>
+				One die, a hundred procedural TSL materials and fifty finishes — mix a suit, material and finish, or browse the sheets.
+			</small>
+		</div>
+
+		<script type="importmap">
+			{
+				"imports": {
+					"three": "../build/three.webgpu.js",
+					"three/webgpu": "../build/three.webgpu.js",
+					"three/tsl": "../build/three.tsl.js",
+					"three/addons/": "./jsm/"
+				}
+			}
+		</script>
+
+		<script type="module">
+
+			import * as THREE from 'three/webgpu';
+			import { Fn, atan, attribute, cameraPosition, color, cos, dFdx, dFdy, emissive, faceDirection, float, floor, fract, hue, max, min, mix, mrt, mx_cell_noise_float, mx_fractal_noise_float, mx_noise_float, mx_worley_noise_float, normalLocal, normalView, normalWorld, output, pass, pmremTexture, positionLocal, positionView, positionWorld, reflector, refract, screenUV, sin, smoothstep, step, time, vec2, vec3, vec4 } from 'three/tsl';
+
+			import { Inspector } from 'three/addons/inspector/Inspector.js';
+
+			import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+			import { HDRLoader } from 'three/addons/loaders/HDRLoader.js';
+			import { FontLoader } from 'three/addons/loaders/FontLoader.js';
+			import { TextGeometry } from 'three/addons/geometries/TextGeometry.js';
+			import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
+			import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+			import { bloom } from 'three/addons/tsl/display/BloomNode.js';
+
+			// die shape
+
+			const BEVEL = 0.07;
+			const DISH_RADIUS = 0.1;
+			const DISH_DEPTH = 0.05;
+			const GEM_RADIUS = 0.11;
+			const GEM_FLUSH = 0.002;
+			const PIP_OFFSET = 0.225;
+
+			// standard western die - opposite faces sum to seven
+
+			const FACES = [
+				{ value: 6, n: [ 1, 0, 0 ], t: [ 0, 0, - 1 ], b: [ 0, 1, 0 ] },
+				{ value: 1, n: [ - 1, 0, 0 ], t: [ 0, 0, 1 ], b: [ 0, 1, 0 ] },
+				{ value: 5, n: [ 0, 1, 0 ], t: [ 1, 0, 0 ], b: [ 0, 0, - 1 ] },
+				{ value: 2, n: [ 0, - 1, 0 ], t: [ 1, 0, 0 ], b: [ 0, 0, 1 ] },
+				{ value: 3, n: [ 0, 0, 1 ], t: [ 1, 0, 0 ], b: [ 0, 1, 0 ] },
+				{ value: 4, n: [ 0, 0, - 1 ], t: [ - 1, 0, 0 ], b: [ 0, 1, 0 ] }
+			];
+
+			const PIP_LAYOUTS = {
+				1: [[ 0, 0 ]],
+				2: [[ - 1, - 1 ], [ 1, 1 ]],
+				3: [[ - 1, - 1 ], [ 0, 0 ], [ 1, 1 ]],
+				4: [[ - 1, - 1 ], [ - 1, 1 ], [ 1, - 1 ], [ 1, 1 ]],
+				5: [[ - 1, - 1 ], [ - 1, 1 ], [ 0, 0 ], [ 1, - 1 ], [ 1, 1 ]],
+				6: [[ - 1, - 1 ], [ - 1, 0 ], [ - 1, 1 ], [ 1, - 1 ], [ 1, 0 ], [ 1, 1 ]]
+			};
+
+			const SUITS = {
+				emerald: { core: 0x0fae5e, deep: 0x03421f, glow: 0x36e392, neon: 0x2bff9e, ior: 1.58 },
+				ruby: { core: 0xd91c44, deep: 0x4a0512, glow: 0xff5a6e, neon: 0xff4a5f, ior: 1.77 },
+				sapphire: { core: 0x2450d9, deep: 0x081249, glow: 0x4e79ff, neon: 0x3f7dff, ior: 1.77 },
+				amethyst: { core: 0x8f46d9, deep: 0x2e0b57, glow: 0xbe7dff, neon: 0xb95cff, ior: 1.55 }
+			};
+
+			let camera, scene, renderer, controls, postProcessing, font;
+
+			let envMap;
+
+			const timer = new THREE.Timer();
+
+			const die = {};
+			const sheet = { group: null, kind: null, page: 0 };
+
+			const params = {
+				suit: 'emerald',
+				material: 'Ceramic',
+				finish: 'None',
+				view: 'single die',
+				page: 1,
+				rotate: true
+			};
+
+			init();
+
+			async function init() {
+
+				camera = new THREE.PerspectiveCamera( 38, window.innerWidth / window.innerHeight, 0.1, 100 );
+				camera.position.set( 0, 2.4, 4.4 );
+
+				scene = new THREE.Scene();
+				scene.backgroundNode = mix( color( 0x16171d ), color( 0x050507 ), smoothstep( 0.0, 1.0, screenUV.sub( vec2( 0.5, 0.55 ) ).length().mul( 1.6 ) ) );
+
+				envMap = await new HDRLoader().setPath( 'textures/equirectangular/' ).loadAsync( 'monochrome_studio_02_1k.hdr' );
+				envMap.mapping = THREE.EquirectangularReflectionMapping;
+
+				scene.environment = envMap;
+				scene.environmentIntensity = 1.1;
+
+				// lights
+
+				const keyLight = new THREE.DirectionalLight( 0xffffff, 1.6 );
+				keyLight.position.set( 4.5, 8, 3.5 );
+				keyLight.castShadow = true;
+				keyLight.shadow.mapSize.set( 2048, 2048 );
+				keyLight.shadow.camera.near = 1;
+				keyLight.shadow.camera.far = 25;
+				keyLight.shadow.camera.top = 6;
+				keyLight.shadow.camera.right = 6;
+				keyLight.shadow.camera.bottom = - 6;
+				keyLight.shadow.camera.left = - 6;
+				keyLight.shadow.normalBias = 0.03;
+				scene.add( keyLight );
+
+				const rimLight = new THREE.DirectionalLight( 0x8fb7ff, 0.5 );
+				rimLight.position.set( - 6, 3, - 5 );
+				scene.add( rimLight );
+
+				createSlab();
+
+				// geometry shared by the single die and the browse sheets
+
+				die.bodyGeometry = createDieBodyGeometry( true );
+				die.blankGeometry = createDieBodyGeometry( false );
+				die.pipsGeometry = createPipsGeometry();
+				die.pluggedPipsGeometry = createPipsGeometry( [ 1 ] );
+				die.plugGeometry = new THREE.CylinderGeometry( 0.115, 0.115, 0.05, 48 );
+				die.plugGeometry.rotateZ( Math.PI / 2 );
+
+				font = await new FontLoader().loadAsync( 'fonts/helvetiker_regular.typeface.json' );
+
+				// the die under inspection
+
+				die.root = new THREE.Group();
+				die.root.position.set( 0, 0.5, 0 );
+				scene.add( die.root );
+
+				die.body = new THREE.Mesh( die.bodyGeometry, null );
+				die.body.castShadow = true;
+				die.body.receiveShadow = true;
+				die.root.add( die.body );
+
+				die.pips = new THREE.Mesh( die.pipsGeometry, null );
+				die.root.add( die.pips );
+
+				die.plug = new THREE.Mesh( die.plugGeometry, createPlugMaterial() );
+				die.plug.position.x = - 0.482;
+				die.root.add( die.plug );
+
+				applySelection();
+
+				// renderer
+
+				renderer = new THREE.WebGPURenderer( { antialias: true } );
+				renderer.setPixelRatio( window.devicePixelRatio );
+				renderer.setSize( window.innerWidth, window.innerHeight );
+				renderer.toneMapping = THREE.ACESFilmicToneMapping;
+				renderer.toneMappingExposure = 1.1;
+				renderer.shadowMap.enabled = true;
+				renderer.setAnimationLoop( animate );
+				document.body.appendChild( renderer.domElement );
+
+				renderer.inspector = new Inspector();
+				document.body.appendChild( renderer.inspector.domElement );
+
+				controls = new OrbitControls( camera, renderer.domElement );
+				controls.target.set( 0, 0.5, 0 );
+				controls.enableDamping = true;
+				controls.maxPolarAngle = Math.PI * 0.49;
+				controls.minDistance = 0.5;
+				controls.maxDistance = 30;
+
+				// selective bloom from the emissive channel
+
+				const scenePass = pass( scene, camera );
+
+				const mrtNode = mrt( {
+					output: output,
+					emissive: vec4( emissive, output.a )
+				} );
+
+				mrtNode.setBlendMode( 'emissive', new THREE.BlendMode( THREE.NormalBlending ) );
+
+				scenePass.setMRT( mrtNode );
+
+				const bloomPass = bloom( scenePass.getTextureNode( 'emissive' ), 0.45, 0.25 );
+
+				postProcessing = new THREE.RenderPipeline( renderer );
+				postProcessing.outputNode = scenePass.getTextureNode().add( bloomPass );
+
+				// interface
+
+				const gui = renderer.inspector.createParameters( 'Dice Lab' );
+
+				gui.add( params, 'suit', Object.keys( SUITS ) ).onChange( applySelection );
+				gui.add( params, 'material', MATERIALS.map( ( m ) => m[ 0 ] ) ).onChange( applySelection );
+				gui.add( params, 'finish', [ 'None', ...FINISHES.map( ( f ) => f[ 0 ] ) ] ).onChange( applySelection );
+				gui.add( params, 'rotate' );
+				gui.add( {
+					random: () => {
+
+						params.material = MATERIALS[ Math.floor( Math.random() * MATERIALS.length ) ][ 0 ];
+						params.finish = Math.random() < 0.5 ? 'None' : FINISHES[ Math.floor( Math.random() * FINISHES.length ) ][ 0 ];
+						applySelection();
+
+					}
+				}, 'random' ).name( 'surprise me' );
+
+				const browse = gui.addFolder( 'browse sheets' );
+				browse.add( params, 'view', [ 'single die', 'material sheets', 'finish sheets' ] ).onChange( applyView );
+				browse.add( params, 'page', 1, 13, 1 ).onChange( applyView );
+
+				const rendering = gui.addFolder( 'rendering' );
+				rendering.close();
+				rendering.add( scene, 'environmentIntensity', 0, 3, 0.01 );
+				rendering.add( renderer, 'toneMappingExposure', 0, 2, 0.01 ).name( 'exposure' );
+				rendering.add( bloomPass.strength, 'value', 0, 2, 0.01 ).name( 'bloomStrength' );
+				rendering.add( bloomPass.radius, 'value', 0, 1, 0.01 ).name( 'bloomRadius' );
+
+				window.addEventListener( 'resize', onWindowResize );
+
+			}
+
+			//
+
+			function onWindowResize() {
+
+				camera.aspect = window.innerWidth / window.innerHeight;
+				camera.updateProjectionMatrix();
+
+				renderer.setSize( window.innerWidth, window.innerHeight );
+
+			}
+
+			function animate() {
+
+				timer.update();
+
+				const delta = Math.min( timer.getDelta(), 0.1 );
+
+				if ( params.rotate && params.view === 'single die' ) die.root.rotation.y += delta * 0.3;
+
+				controls.update();
+
+				postProcessing.render();
+
+			}
+
+			// selection ---------------------------------------------------------------
+
+			const bodyCache = new Map();
+			const pipCache = new Map();
+
+			function materialFor( def ) {
+
+				const key = def.material + '|' + ( def.finish ?? '' ) + '|' + def.suit;
+
+				if ( bodyCache.has( key ) ) return bodyCache.get( key );
+
+				const material = buildBodyMaterial( def );
+				bodyCache.set( key, material );
+
+				return material;
+
+			}
+
+			function pipsFor( def ) {
+
+				const style = def.material === 'Prism' ? 'prism' : def.suit;
+				const key = style + '|' + ( def.finish === 'Neon' ? 'neon' : '' );
+
+				if ( pipCache.has( key ) ) return pipCache.get( key );
+
+				const material = buildPipMaterial( style, def.finish === 'Neon' );
+				pipCache.set( key, material );
+
+				return material;
+
+			}
+
+			function applySelection() {
+
+				const def = { material: params.material, finish: params.finish === 'None' ? null : params.finish, suit: params.suit };
+
+				die.body.geometry = def.material === 'Lead' ? die.blankGeometry : die.bodyGeometry;
+				die.body.material = materialFor( def );
+
+				die.pips.visible = def.material !== 'Lead';
+				die.pips.geometry = def.material === 'Loaded' ? die.pluggedPipsGeometry : die.pipsGeometry;
+				die.pips.material = pipsFor( def );
+
+				die.plug.visible = def.material === 'Loaded';
+
+			}
+
+			// browse sheets - nine dice per page
+
+			function applyView() {
+
+				if ( sheet.group !== null ) {
+
+					scene.remove( sheet.group );
+					sheet.group = null;
+
+				}
+
+				const single = params.view === 'single die';
+
+				die.root.visible = single;
+
+				if ( single ) {
+
+					camera.position.set( 0, 2.4, 4.4 );
+					controls.target.set( 0, 0.5, 0 );
+					return;
+
+				}
+
+				const list = params.view === 'material sheets' ? MATERIALS : FINISHES;
+				const isFinish = list === FINISHES;
+				const pages = Math.ceil( list.length / 9 );
+				const page = Math.min( params.page, pages ) - 1;
+
+				sheet.group = new THREE.Group();
+				scene.add( sheet.group );
+
+				for ( let i = 0; i < 9; i ++ ) {
+
+					const entry = list[ page * 9 + i ];
+					if ( entry === undefined ) break;
+
+					const name = entry[ 0 ];
+					const def = isFinish
+						? { material: params.material, finish: name, suit: params.suit }
+						: { material: name, finish: null, suit: params.suit };
+
+					const root = new THREE.Group();
+					root.position.set( ( ( i % 3 ) - 1 ) * 1.6, 0.5, ( Math.floor( i / 3 ) - 1 ) * 1.8 - 0.2 );
+					sheet.group.add( root );
+
+					const body = new THREE.Mesh( def.material === 'Lead' ? die.blankGeometry : die.bodyGeometry, materialFor( def ) );
+					body.castShadow = true;
+					body.receiveShadow = true;
+					root.add( body );
+
+					if ( def.material !== 'Lead' ) {
+
+						const pips = new THREE.Mesh( def.material === 'Loaded' ? die.pluggedPipsGeometry : die.pipsGeometry, pipsFor( def ) );
+						root.add( pips );
+
+					}
+
+					if ( def.material === 'Loaded' ) {
+
+						const plug = new THREE.Mesh( die.plugGeometry, createPlugMaterial() );
+						plug.position.x = - 0.482;
+						root.add( plug );
+
+					}
+
+					const labelGeometry = new TextGeometry( name, { font, size: 0.11, depth: 0.01, curveSegments: 5 } );
+					labelGeometry.computeBoundingBox();
+					labelGeometry.translate( - 0.5 * ( labelGeometry.boundingBox.max.x + labelGeometry.boundingBox.min.x ), 0, 0 );
+					labelGeometry.rotateX( - Math.PI / 2 + 0.95 );
+
+					const labelMaterial = new THREE.MeshStandardNodeMaterial( { color: 0x83848c, roughness: 0.6 } );
+					labelMaterial.emissiveNode = color( 0x3a3b42 );
+
+					const label = new THREE.Mesh( labelGeometry, labelMaterial );
+					label.position.set( root.position.x, 0.004, root.position.z + 0.72 );
+					sheet.group.add( label );
+
+				}
+
+				camera.position.set( 0, 7.6, 7 );
+				controls.target.set( 0, 0, 0.2 );
+
+			}
+
+			// geometry ---------------------------------------------------------------
+
+			function gridLine( bevelSegments, faceSegments ) {
+
+				const line = [];
+
+				for ( let i = 0; i <= bevelSegments; i ++ ) line.push( ( i / bevelSegments ) * BEVEL );
+				for ( let i = 1; i <= faceSegments; i ++ ) line.push( BEVEL + ( i / faceSegments ) * ( 1 - 2 * BEVEL ) );
+				for ( let i = 1; i <= bevelSegments; i ++ ) line.push( 1 - BEVEL + ( i / bevelSegments ) * BEVEL );
+
+				return line;
+
+			}
+
+			function dishProfile( t ) {
+
+				const x = Math.min( 1, ( 1 - t ) / 0.45 );
+				return x * x * ( 3 - 2 * x );
+
+			}
+
+			function createDieBodyGeometry( withPips ) {
+
+				const line = gridLine( 12, 64 );
+				const count = line.length;
+				const inner = 0.5 - BEVEL;
+
+				const positions = [];
+				const normals = [];
+				const pipAos = [];
+				const indices = [];
+
+				for ( const face of FACES ) {
+
+					const [ nx, ny, nz ] = face.n;
+					const [ tx, ty, tz ] = face.t;
+					const [ bx, by, bz ] = face.b;
+
+					const pips = withPips ? PIP_LAYOUTS[ face.value ] : [];
+					const offset = positions.length / 3;
+
+					for ( let iy = 0; iy < count; iy ++ ) {
+
+						for ( let ix = 0; ix < count; ix ++ ) {
+
+							const u = line[ ix ] - 0.5;
+							const v = line[ iy ] - 0.5;
+
+							let px = nx * 0.5 + tx * u + bx * v;
+							let py = ny * 0.5 + ty * u + by * v;
+							let pz = nz * 0.5 + tz * u + bz * v;
+
+							const qx = Math.max( - inner, Math.min( inner, px ) );
+							const qy = Math.max( - inner, Math.min( inner, py ) );
+							const qz = Math.max( - inner, Math.min( inner, pz ) );
+
+							const dl = Math.hypot( px - qx, py - qy, pz - qz );
+
+							let nrx = ( px - qx ) / dl;
+							let nry = ( py - qy ) / dl;
+							let nrz = ( pz - qz ) / dl;
+
+							px = qx + nrx * BEVEL;
+							py = qy + nry * BEVEL;
+							pz = qz + nrz * BEVEL;
+
+							let ao = 0;
+
+							for ( const [ cx, cy ] of pips ) {
+
+								const du = u - cx * PIP_OFFSET;
+								const dv = v - cy * PIP_OFFSET;
+								const r = Math.hypot( du, dv );
+								const t = r / DISH_RADIUS;
+
+								if ( t >= 1 ) continue;
+
+								const profile = dishProfile( t );
+
+								px -= nx * DISH_DEPTH * profile;
+								py -= ny * DISH_DEPTH * profile;
+								pz -= nz * DISH_DEPTH * profile;
+
+								if ( t > 0.55 ) {
+
+									const x = ( 1 - t ) / 0.45;
+									const slope = - 6 * x * ( 1 - x ) / ( 0.45 * DISH_RADIUS ) * DISH_DEPTH;
+									const hu = slope * du / r;
+									const hv = slope * dv / r;
+
+									nrx = nx + tx * hu + bx * hv;
+									nry = ny + ty * hu + by * hv;
+									nrz = nz + tz * hu + bz * hv;
+
+									const nl = Math.hypot( nrx, nry, nrz );
+									nrx /= nl; nry /= nl; nrz /= nl;
+
+								}
+
+								ao = Math.max( ao, profile );
+
+							}
+
+							positions.push( px, py, pz );
+							normals.push( nrx, nry, nrz );
+							pipAos.push( ao );
+
+						}
+
+					}
+
+					for ( let iy = 0; iy < count - 1; iy ++ ) {
+
+						for ( let ix = 0; ix < count - 1; ix ++ ) {
+
+							const a = offset + iy * count + ix;
+							const b = a + 1;
+							const c = a + count + 1;
+							const d = a + count;
+
+							indices.push( a, b, c, a, c, d );
+
+						}
+
+					}
+
+				}
+
+				const geometry = new THREE.BufferGeometry();
+				geometry.setIndex( indices );
+				geometry.setAttribute( 'position', new THREE.Float32BufferAttribute( positions, 3 ) );
+				geometry.setAttribute( 'normal', new THREE.Float32BufferAttribute( normals, 3 ) );
+				geometry.setAttribute( 'pipAo', new THREE.Float32BufferAttribute( pipAos, 1 ) );
+
+				return geometry;
+
+			}
+
+			function createPipsGeometry( excludeValues = [] ) {
+
+				const caps = [];
+				let pipIndex = 0;
+
+				for ( const face of FACES ) {
+
+					if ( excludeValues.includes( face.value ) ) continue;
+
+					const [ nx, ny, nz ] = face.n;
+					const [ tx, ty, tz ] = face.t;
+					const [ bx, by, bz ] = face.b;
+
+					const orientation = new THREE.Quaternion().setFromUnitVectors( new THREE.Vector3( 0, 1, 0 ), new THREE.Vector3( nx, ny, nz ) );
+
+					for ( const [ cx, cy ] of PIP_LAYOUTS[ face.value ] ) {
+
+						const u = cx * PIP_OFFSET;
+						const v = cy * PIP_OFFSET;
+
+						const center = new THREE.Vector3(
+							nx * ( 0.5 - GEM_FLUSH - GEM_RADIUS ) + tx * u + bx * v,
+							ny * ( 0.5 - GEM_FLUSH - GEM_RADIUS ) + ty * u + by * v,
+							nz * ( 0.5 - GEM_FLUSH - GEM_RADIUS ) + tz * u + bz * v
+						);
+
+						const cap = new THREE.SphereGeometry( GEM_RADIUS, 28, 18, 0, Math.PI * 2, 0, 1.05 );
+						cap.applyQuaternion( orientation );
+						cap.translate( center.x, center.y, center.z );
+
+						const vertexCount = cap.attributes.position.count;
+						const centers = new Float32Array( vertexCount * 3 );
+						const seeds = new Float32Array( vertexCount );
+						const seed = ( ( pipIndex ++ ) * 0.618034 ) % 1;
+
+						for ( let i = 0; i < vertexCount; i ++ ) {
+
+							centers.set( [ center.x, center.y, center.z ], i * 3 );
+							seeds[ i ] = seed;
+
+						}
+
+						cap.setAttribute( 'gemCenter', new THREE.BufferAttribute( centers, 3 ) );
+						cap.setAttribute( 'gemSeed', new THREE.BufferAttribute( seeds, 1 ) );
+
+						caps.push( cap );
+
+					}
+
+				}
+
+				return mergeGeometries( caps );
+
+			}
+
+			// tsl helpers ------------------------------------------------------------
+
+			function fbm( position, octaves = 3 ) {
+
+				return mx_fractal_noise_float( position, octaves, 2, 0.5 );
+
+			}
+
+			// 1 on the rounded edges and corners, 0 on the flat faces
+
+			function bevelMask() {
+
+				const e = positionLocal.abs().sub( 0.5 - BEVEL ).div( BEVEL ).clamp();
+				return e.x.mul( e.y ).add( e.y.mul( e.z ) ).add( e.z.mul( e.x ) ).clamp();
+
+			}
+
+			// distance to the face border, in the plane of whichever face the point is on
+
+			function faceEdgeDist( p ) {
+
+				const e = vec3( 0.5 ).sub( p.abs() );
+				return min( min( max( e.x, e.y ), max( e.y, e.z ) ), max( e.z, e.x ) );
+
+			}
+
+			function fresnel( power ) {
+
+				const facing = normalWorld.dot( cameraPosition.sub( positionWorld ).normalize() ).clamp();
+				return facing.oneMinus().pow( power );
+
+			}
+
+			// irregular, view-shifting sparkle - the product of two decorrelated noises
+			// keeps the glints jagged instead of reading as round decals
+
+			function glints( p, frequency, gain ) {
+
+				const a = mx_noise_float( p.mul( frequency ) );
+				const b = mx_noise_float( p.mul( frequency * 1.61 ).add( 47.3 ) );
+
+				return a.max( 0 ).mul( b.max( 0 ) ).pow( 3 ).mul( gain );
+
+			}
+
+			// thin bright branching lines
+
+			function veins( p, scale, sharpness, seed = 0 ) {
+
+				return fbm( p.mul( scale ).add( seed ) ).abs().oneMinus().clamp().pow( sharpness );
+
+			}
+
+			// warped parallel banding in [ 0, 1 ]
+
+			function bands( p, direction, frequency, warp = 2, seed = 0 ) {
+
+				return sin( p.dot( direction ).mul( frequency ).add( fbm( p.mul( 3 ).add( seed ) ).mul( warp ) ) ).mul( 0.5 ).add( 0.5 );
+
+			}
+
+			// constant random value per lattice cell
+
+			function cells( p, scale, seed = 0 ) {
+
+				return mx_cell_noise_float( p.mul( scale ).add( seed ) );
+
+			}
+
+			// mask that creeps outward from a point with a noisy frontier
+
+			function creep( p, from, radius, fuzz = 0.35, seed = 0 ) {
+
+				const d = p.sub( from ).length().add( fbm( p.mul( 5 ).add( seed ), 2 ).mul( fuzz ) );
+				return smoothstep( radius - 0.3, radius, d ).oneMinus();
+
+			}
+
+			// gathers on the top of the die and spills a little over the edges
+
+			function topCoat( p, level = 0.32, fuzz = 0.14, seed = 0 ) {
+
+				return smoothstep( level, level + 0.1, p.y.add( fbm( vec3( p.x, 0, p.z ).mul( 6 ).add( seed ), 2 ).mul( fuzz ) ) );
+
+			}
+
+			// lattice lines projected on the faces, ignoring the face-normal axis
+
+			function latticeLines( p, frequency, width ) {
+
+				const f = fract( p.mul( frequency ) );
+				const d = min( f, f.oneMinus() );
+				const w = normalLocal.abs().oneMinus();
+
+				const lx = smoothstep( width, width * 0.5, d.x ).mul( w.x );
+				const ly = smoothstep( width, width * 0.5, d.y ).mul( w.y );
+				const lz = smoothstep( width, width * 0.5, d.z ).mul( w.z );
+
+				return max( lx, max( ly, lz ) ).clamp();
+
+			}
+
+			// perturbs the normal from a procedural height field
+
+			function proceduralBump( heightAt, scale ) {
+
+				return Fn( () => {
+
+					const height = heightAt( positionLocal );
+					const dHdx = heightAt( positionLocal.add( dFdx( positionLocal ).clamp( - 0.01, 0.01 ) ) ).sub( height );
+					const dHdy = heightAt( positionLocal.add( dFdy( positionLocal ).clamp( - 0.01, 0.01 ) ) ).sub( height );
+
+					const sigmaX = dFdx( positionView );
+					const sigmaY = dFdy( positionView );
+
+					const r1 = sigmaY.cross( normalView );
+					const r2 = normalView.cross( sigmaX );
+
+					const det = sigmaX.dot( r1 ).mul( faceDirection );
+					const gradient = det.sign().mul( dHdx.mul( r1 ).add( dHdy.mul( r2 ) ) ).mul( scale );
+
+					return det.abs().mul( normalView ).sub( gradient ).normalize();
+
+				} )();
+
+			}
+
+			function spectrum( t ) {
+
+				return cos( vec3( t ).add( vec3( 0, 0.33, 0.67 ) ).mul( Math.PI * 2 ) ).mul( 0.5 ).add( 0.5 );
+
+			}
+
+			function viewIncident() {
+
+				return positionWorld.sub( cameraPosition ).normalize();
+
+			}
+
+			// shared recipe for the elemental auras
+
+			function elementalAura( surf, tintA, tintB, drift, seed ) {
+
+				const p = positionLocal;
+
+				const field = fbm( p.mul( 3 ).add( drift ).add( seed ) );
+				const wisps = field.abs().oneMinus().clamp().pow( 4 );
+				const body = smoothstep( 0.2, 0.9, field.mul( 0.5 ).add( 0.5 ) );
+
+				const auraColor = mix( color( tintA ), color( tintB ), body );
+
+				addEmissive( surf, auraColor.mul( wisps.mul( 0.8 ).add( body.mul( 0.2 ) ) ).mul( fresnel( 1.6 ).mul( 0.8 ).add( 0.3 ) ).mul( 1.1 ) );
+
+			}
+
+			// shared recipe for the gem dust coats
+
+			function gemDust( surf, dustColor ) {
+
+				const p = positionLocal;
+
+				const dust = glints( p, 130, 16 ).clamp();
+				const powder = smoothstep( 0.4, 0.8, mx_noise_float( p.mul( 55 ).add( 8.8 ) ).mul( 0.5 ).add( 0.5 ) );
+
+				surf.color = mix( surf.color, color( dustColor ), powder.mul( 0.22 ) );
+				surf.roughness = surf.roughness.add( powder.mul( 0.15 ) );
+				addEmissive( surf, color( dustColor ).mul( dust ).mul( 1.3 ).add( color( dustColor ).mul( powder ).mul( 0.06 ) ) );
+
+			}
+
+			// shared recipe for the wood species
+
+			function woodSurf( surf, options ) {
+
+				const { light, dark, ringFrequency, warp, rough, gloss, seed } = options;
+				const p = positionLocal;
+
+				const rings = ( q ) => sin( q.yz.length().mul( ringFrequency ).add( fbm( q.mul( 3 ).add( seed ) ).mul( warp ) ).add( q.x.mul( 1.5 ) ) );
+				const latewood = smoothstep( - 0.2, 0.85, rings( p ) );
+				const streaks = mx_noise_float( vec3( p.x.mul( 8 ), p.y.mul( 150 ), p.z.mul( 150 ) ).add( seed ) ).mul( 0.5 ).add( 0.5 );
+
+				surf.color = mix( color( light ), color( dark ), latewood.mul( 0.75 ).add( streaks.mul( 0.25 ) ) );
+				surf.roughness = float( rough ).add( latewood.mul( 0.12 ) );
+				surf.clearcoat = float( gloss );
+				surf.clearcoatRoughness = float( 0.25 );
+				surf.height.push( ( q ) => sin( q.yz.length().mul( ringFrequency ).add( fbm( q.mul( 3 ).add( seed ) ).mul( warp ) ).add( q.x.mul( 1.5 ) ) ).mul( 0.5 ).add( mx_noise_float( vec3( q.x.mul( 8 ), q.y.mul( 150 ), q.z.mul( 150 ) ).add( seed ) ).mul( 0.4 ) ) );
+				surf.bumpScale = 0.001;
+
+			}
+
+			// decorative carved frame shared by the Etched finish
+
+			function etchMask( p ) {
+
+				const d = faceEdgeDist( p );
+
+				const frame = smoothstep( 0.004, 0.016, d.sub( 0.1 ).abs() ).oneMinus();
+				const hairline = smoothstep( 0.002, 0.009, d.sub( 0.14 ).abs() ).oneMinus();
+
+				const e = vec3( 0.5 ).sub( p.abs() );
+				const diagonal = e.x.add( e.y ).add( e.z ).sub( d.mul( 2 ) ).abs();
+				const corner = smoothstep( 0.004, 0.014, diagonal ).oneMinus().mul( smoothstep( 0.1, 0.12, d ) ).mul( smoothstep( 0.24, 0.2, d ) );
+
+				return frame.add( hairline.mul( 0.6 ) ).add( corner.mul( 0.9 ) ).clamp();
+
+			}
+
+			// materials ----------------------------------------------------------------
+			//
+			// every entry fills a surface description - color, roughness, emissive,
+			// height layers - which an optional finish then builds upon before the
+			// physical material is created
+
+			const MATERIALS = [
+
+				[ 'Ceramic', ( surf ) => {
+
+					const p = positionLocal;
+
+					const tone = fbm( p.mul( 2.6 ).add( 4.7 ) ).mul( 0.5 ).add( 0.5 );
+					const flecks = smoothstep( 0.6, 0.75, mx_noise_float( p.mul( 95 ).add( 3.1 ) ) );
+					const smudge = fbm( p.mul( 6.5 ).add( 17.3 ), 2 ).mul( 0.5 ).add( 0.5 );
+
+					surf.color = mix( color( 0xf0eadb ), color( 0xfbf9f2 ), tone );
+					surf.color = mix( surf.color, color( 0xb8b2a3 ), flecks.mul( 0.5 ) );
+					surf.roughness = float( 0.12 ).add( smudge.mul( 0.12 ) ).add( flecks.mul( 0.2 ) );
+					surf.clearcoat = float( 0.7 );
+					surf.clearcoatRoughness = float( 0.18 ).add( smudge.mul( 0.1 ) );
+					surf.props = { envMapIntensity: 1.15 };
+					surf.height.push( ( q ) => fbm( q.mul( 34 ).add( 7.7 ), 2 ) );
+					surf.bumpScale = 0.0012;
+
+				} ],
+
+				[ 'Chalk', ( surf ) => {
+
+					const p = positionLocal;
+					const bevel = bevelMask();
+
+					const grain = fbm( p.mul( 120 ), 2 );
+					const blotch = fbm( p.mul( 3.4 ).add( 23 ) ).mul( 0.5 ).add( 0.5 );
+
+					surf.color = mix( color( 0xece9e1 ), color( 0xd9d4c8 ), blotch.mul( 0.7 ) ).mul( grain.mul( 0.05 ).add( 1 ) );
+					surf.color = mix( surf.color, color( 0xf7f6f2 ), bevel.mul( 0.55 ) );
+					surf.roughness = float( 0.97 ).sub( bevel.mul( 0.08 ) );
+					surf.sheen = color( 0xffffff ).mul( 0.35 );
+					surf.sheenRoughness = float( 0.85 );
+					surf.aoStrength = 0.5;
+					surf.height.push( ( q ) => fbm( q.mul( 150 ), 2 ).mul( 0.55 ).sub( mx_worley_noise_float( q.mul( 48 ).add( 5.5 ) ).oneMinus().pow( 6 ).mul( 0.8 ) ) );
+					surf.bumpScale = 0.002;
+
+				} ],
+
+				[ 'Ivory', ( surf ) => {
+
+					const p = positionLocal;
+					const bevel = bevelMask();
+					const axis = vec3( 0.18, 0.94, 0.29 );
+
+					const band = ( q ) => sin( q.dot( axis ).mul( 58 ).add( fbm( q.mul( 5.2 ).add( 31 ) ).mul( 3.6 ) ) );
+					const aged = fbm( p.mul( 2.1 ).add( 12.5 ) ).mul( 0.5 ).add( 0.5 );
+					const grain = band( p ).mul( 0.5 ).add( 0.5 );
+
+					surf.color = mix( color( 0xf6efdd ), color( 0xe4d6b0 ), aged.mul( 0.75 ) );
+					surf.color = mix( surf.color, color( 0xd9c69c ), grain.pow( 2 ).mul( 0.35 ) );
+					surf.color = mix( surf.color, color( 0xcfa86a ), attribute( 'pipAo' ).mul( 0.4 ) );
+					surf.roughness = float( 0.34 ).add( grain.mul( 0.06 ) ).sub( bevel.mul( 0.12 ) );
+					surf.clearcoat = float( 0.45 );
+					surf.clearcoatRoughness = float( 0.28 );
+					surf.emissive = color( 0xffdda6 ).mul( fresnel( 2.5 ) ).mul( 0.09 );
+					surf.height.push( ( q ) => band( q ).mul( 0.5 ) );
+					surf.bumpScale = 0.0008;
+
+				} ],
+
+				[ 'Crystal', ( surf ) => {
+
+					const p = positionLocal;
+					const refracted = refract( viewIncident(), normalWorld, 1 / 1.55 );
+
+					const cloud = smoothstep( 0.32, 0.85, fbm( p.mul( 4.1 ).add( 8.2 ), 4 ).mul( 0.5 ).add( 0.5 ) );
+					const wisp = fbm( p.add( refracted.mul( 0.16 ) ).mul( 5.5 ).add( 2.7 ) ).abs().oneMinus().pow( 3 );
+					const sparkle = glints( p.add( refracted.mul( 0.1 ) ), 90, 8 ).clamp();
+
+					surf.color = mix( color( 0xffffff ), color( 0xe3edf4 ), cloud.mul( 0.5 ) );
+					surf.roughness = float( 0.02 ).add( cloud.mul( 0.28 ) );
+					surf.clearcoat = float( 1 );
+					surf.clearcoatRoughness = float( 0.03 );
+					surf.emissive = color( 0xf4f9ff ).mul( wisp.mul( cloud ).mul( 0.12 ).add( sparkle.mul( 0.35 ) ) );
+					surf.aoStrength = 0.2;
+					surf.props = { transmission: 1, thickness: 0.8, ior: 1.55, attenuationColor: new THREE.Color( 0xe9f2f8 ), attenuationDistance: 2.2, envMapIntensity: 1.2 };
+
+				} ],
+
+				[ 'Obsidian', ( surf ) => {
+
+					const p = positionLocal;
+					const bevel = bevelMask();
+					const refracted = refract( viewIncident(), normalWorld, 1 / 1.5 );
+
+					const flow = fbm( vec3( p.x.mul( 2.4 ), p.y.mul( 7 ), p.z.mul( 2.4 ) ).add( 15.5 ) );
+					const smoke = fbm( p.add( refracted.mul( 0.14 ) ).mul( 3.6 ).add( 9.1 ) ).mul( 0.5 ).add( 0.5 );
+					const glitter = glints( p.add( refracted.mul( 0.08 ) ), 70, 5 ).clamp();
+
+					surf.color = mix( color( 0x0b0b0e ), color( 0x16171d ), flow.mul( 0.5 ).add( 0.5 ).mul( 0.45 ) );
+					surf.roughness = float( 0.04 ).add( flow.abs().mul( 0.03 ) ).sub( bevel.mul( 0.02 ) ).clamp( 0.02, 1 );
+					surf.clearcoat = float( 1 );
+					surf.clearcoatRoughness = float( 0.02 );
+					surf.emissive = color( 0x99a3b8 ).mul( smoke.mul( smoke ) ).mul( 0.03 ).add( color( 0xcfd8e8 ).mul( glitter ).mul( 0.1 ) );
+					surf.aoStrength = 0.6;
+					surf.props = { envMapIntensity: 1.0 };
+					surf.height.push( ( q ) => sin( fbm( q.mul( 3 ), 2 ).mul( 7 ).add( q.dot( vec3( 2.2, 5.1, 3.4 ) ) ) ) );
+					surf.bumpScale = 0.0006;
+
+				} ],
+
+				[ 'Lead', ( surf ) => {
+
+					const p = positionLocal;
+					const bevel = bevelMask();
+
+					const oxide = smoothstep( 0.25, 0.85, fbm( p.mul( 3.2 ).add( 41 ), 4 ).mul( 0.5 ).add( 0.5 ) );
+					const mottle = fbm( p.mul( 38 ).add( 7 ), 2 ).mul( 0.5 ).add( 0.5 );
+					const scratches = max(
+						smoothstep( 0, 0.05, mx_noise_float( vec3( p.x.mul( 4 ), p.y.mul( 170 ), p.z.mul( 4 ) ).add( 3.3 ) ).abs() ).oneMinus(),
+						smoothstep( 0, 0.05, mx_noise_float( vec3( p.x.mul( 150 ), p.y.mul( 5 ), p.z.mul( 160 ) ).add( 8.1 ) ).abs() ).oneMinus()
+					);
+
+					surf.color = mix( color( 0x64676d ), color( 0x82868c ), oxide ).mul( mottle.mul( 0.1 ).add( 0.95 ) ).add( scratches.mul( 0.05 ) );
+					surf.color = mix( surf.color, color( 0x9aa0a6 ), bevel.mul( 0.35 ) );
+					surf.metalness = float( 0.9 ).sub( oxide.mul( 0.25 ) );
+					surf.roughness = float( 0.55 ).add( oxide.mul( 0.25 ) ).sub( bevel.mul( 0.2 ) ).sub( scratches.mul( 0.15 ) ).clamp( 0.2, 1 );
+					surf.height.push( ( q ) => fbm( q.mul( 5.5 ).add( 19 ) ).mul( 1.2 ) );
+					surf.bumpScale = 0.0025;
+
+				} ],
+
+				[ 'Gilded', ( surf ) => {
+
+					const p = positionLocal;
+					const bevel = bevelMask();
+
+					const wear = fbm( p.mul( 6.2 ).add( 43 ) ).mul( 0.5 ).add( 0.5 );
+					const scratches = max(
+						smoothstep( 0, 0.045, mx_noise_float( vec3( p.x.mul( 7 ), p.y.mul( 260 ), p.z.mul( 7 ) ).add( 13 ) ).abs() ).oneMinus(),
+						smoothstep( 0, 0.045, mx_noise_float( vec3( p.x.mul( 240 ), p.y.mul( 8 ), p.z.mul( 250 ) ).add( 27 ) ).abs() ).oneMinus()
+					);
+
+					surf.color = mix( color( 0xc08c2c ), color( 0xf1cd6f ), wear );
+					surf.color = mix( surf.color, color( 0xffe9ad ), bevel.mul( 0.5 ) );
+					surf.color = mix( surf.color, color( 0x8a6a25 ), scratches.mul( 0.35 ) );
+					surf.metalness = float( 1 );
+					surf.roughness = float( 0.12 ).add( wear.mul( 0.05 ) ).add( scratches.mul( 0.12 ) ).sub( bevel.mul( 0.08 ) ).clamp( 0.04, 1 );
+					surf.props = { envMapIntensity: 1.35 };
+					surf.height.push( ( q ) => fbm( q.mul( 42 ).add( 3 ), 2 ) );
+					surf.bumpScale = 0.0007;
+
+				} ],
+
+				[ 'Loaded', ( surf ) => {
+
+					MATERIAL_FNS.Ceramic( surf );
+
+					const p = positionLocal;
+
+					const core = smoothstep( 0.62, 0.2, p.sub( vec3( - 0.24, - 0.08, 0.04 ) ).length() );
+					surf.color = surf.color.mul( core.mul( 0.14 ).oneMinus() );
+
+					const onFace = smoothstep( 0.42, 0.5, p.x.negate() );
+					const ring = smoothstep( 0, 0.02, p.yz.length().sub( 0.135 ).abs() ).oneMinus().mul( onFace );
+					surf.color = mix( surf.color, color( 0x8d8d90 ), ring.mul( 0.35 ) );
+
+				} ],
+
+				[ 'Prism', ( surf ) => {
+
+					const p = positionLocal;
+					const incident = viewIncident();
+
+					const spectral = vec3(
+						pmremTexture( envMap, refract( incident, normalWorld, 1 / 1.58 ), float( 0.03 ) ).r,
+						pmremTexture( envMap, refract( incident, normalWorld, 1 / 1.66 ), float( 0.03 ) ).g,
+						pmremTexture( envMap, refract( incident, normalWorld, 1 / 1.74 ), float( 0.03 ) ).b
+					);
+
+					const rim = fresnel( 2 );
+
+					surf.color = color( 0xffffff );
+					surf.roughness = float( 0.015 );
+					surf.emissive = spectral.mul( 0.15 ).add( spectrum( rim.mul( 1.2 ).add( fbm( p.mul( 6 ), 2 ).mul( 0.2 ) ) ).mul( rim ).mul( 0.3 ) );
+					surf.aoStrength = 0.12;
+					surf.props = { transmission: 1, thickness: 1, ior: 1.66, dispersion: 3, attenuationColor: new THREE.Color( 0xffffff ), attenuationDistance: 4, iridescence: 0.4, iridescenceIOR: 1.55, envMapIntensity: 1.3 };
+
+				} ],
+
+				// stones -------------------------------------------------------
+
+				[ 'Marble', ( surf ) => {
+
+					const p = positionLocal;
+
+					const broad = veins( p, 2.2, 9, 5.1 );
+					const fine = veins( p, 5.6, 13, 9.7 );
+					const drift = fbm( p.mul( 1.4 ).add( 2.2 ) ).mul( 0.5 ).add( 0.5 );
+
+					surf.color = mix( color( 0xf5f4f0 ), color( 0xe7e6e1 ), drift );
+					surf.color = mix( surf.color, color( 0x8d939d ), broad.mul( 0.75 ).add( fine.mul( 0.35 ) ).clamp() );
+					surf.roughness = float( 0.13 ).add( broad.mul( 0.1 ) );
+					surf.clearcoat = float( 1 );
+					surf.clearcoatRoughness = float( 0.06 );
+					surf.height.push( ( q ) => veins( q, 2.2, 9, 5.1 ).mul( - 0.8 ) );
+					surf.bumpScale = 0.0008;
+
+				} ],
+
+				[ 'Granite', ( surf ) => {
+
+					const p = positionLocal;
+
+					const quartz = step( 0.62, cells( p, 52 ) );
+					const feldspar = step( 0.7, cells( p, 47, 8.8 ) );
+					const micaSpark = glints( p, 110, 6 ).clamp();
+
+					surf.color = color( 0x757078 );
+					surf.color = mix( surf.color, color( 0xc9c4bb ), quartz.mul( 0.85 ) );
+					surf.color = mix( surf.color, color( 0xb08a86 ), feldspar.mul( 0.6 ) );
+					surf.color = mix( surf.color, color( 0x26262b ), step( 0.72, cells( p, 58, 3.3 ) ).mul( 0.85 ) );
+					surf.roughness = float( 0.32 ).sub( quartz.mul( 0.12 ) );
+					surf.clearcoat = float( 0.7 );
+					surf.clearcoatRoughness = float( 0.1 );
+					surf.emissive = color( 0xfff6e0 ).mul( micaSpark ).mul( 0.25 );
+					surf.height.push( ( q ) => mx_noise_float( q.mul( 52 ) ).mul( 0.6 ) );
+					surf.bumpScale = 0.0008;
+
+				} ],
+
+				[ 'Jade', ( surf ) => {
+
+					const p = positionLocal;
+
+					const cloud = fbm( p.mul( 3.8 ).add( 6.1 ) ).mul( 0.5 ).add( 0.5 );
+					const mottle = fbm( p.mul( 11 ).add( 2.9 ), 2 ).mul( 0.5 ).add( 0.5 );
+
+					surf.color = mix( color( 0x14563a ), color( 0x3f9a68 ), cloud.mul( 0.8 ) );
+					surf.color = mix( surf.color, color( 0x71c193 ), mottle.mul( cloud ).mul( 0.3 ) );
+					surf.roughness = float( 0.16 ).add( mottle.mul( 0.08 ) );
+					surf.clearcoat = float( 0.8 );
+					surf.clearcoatRoughness = float( 0.12 );
+					surf.emissive = color( 0x2f8f5f ).mul( cloud ).mul( fresnel( 2 ).mul( 0.5 ).add( 0.25 ) ).mul( 0.32 );
+					surf.sheen = color( 0x9fd8b4 ).mul( 0.25 );
+					surf.sheenRoughness = float( 0.4 );
+
+				} ],
+
+				[ 'Lapis Lazuli', ( surf ) => {
+
+					const p = positionLocal;
+
+					const depths = fbm( p.mul( 3.2 ).add( 14 ) ).mul( 0.5 ).add( 0.5 );
+					const calcite = veins( p, 2.6, 11, 21.5 );
+					const pyrite = glints( p, 85, 14 ).clamp();
+
+					surf.color = mix( color( 0x14297a ), color( 0x2247c9 ), depths );
+					surf.color = mix( surf.color, color( 0xb9c2d4 ), calcite.mul( 0.5 ) );
+					surf.color = mix( surf.color, color( 0xd8a93e ), pyrite );
+					surf.metalness = pyrite.mul( 0.9 );
+					surf.roughness = float( 0.22 ).sub( pyrite.mul( 0.12 ) ).clamp( 0.05, 1 );
+					surf.clearcoat = float( 0.85 );
+					surf.clearcoatRoughness = float( 0.1 );
+					surf.emissive = color( 0xf3cd72 ).mul( pyrite ).mul( 0.3 );
+
+				} ],
+
+				[ 'Malachite', ( surf ) => {
+
+					const p = positionLocal;
+
+					const warble = fbm( p.mul( 3 ).add( 8.4 ) ).mul( 0.22 );
+					const d1 = p.sub( vec3( 0.4, 0.25, - 0.3 ) ).length().add( warble );
+					const d2 = p.sub( vec3( - 0.5, - 0.3, 0.45 ) ).length().add( warble.mul( 1.3 ) );
+					const ringA = sin( d1.mul( 42 ) ).mul( 0.5 ).add( 0.5 );
+					const ringB = sin( d2.mul( 31 ) ).mul( 0.5 ).add( 0.5 );
+					const swirl = ringA.mul( 0.65 ).add( ringB.mul( 0.35 ) );
+
+					surf.color = mix( color( 0x073520 ), color( 0x2fae6e ), swirl );
+					surf.color = mix( surf.color, color( 0x0d5c38 ), ringB.mul( ringA.oneMinus() ).mul( 0.5 ) );
+					surf.roughness = float( 0.1 ).add( swirl.mul( 0.06 ) );
+					surf.clearcoat = float( 1 );
+					surf.clearcoatRoughness = float( 0.05 );
+
+				} ],
+
+				[ 'Turquoise', ( surf ) => {
+
+					const p = positionLocal;
+
+					const matrix = veins( p, 4.2, 5, 33.3 );
+					const pale = fbm( p.mul( 5.5 ).add( 3.7 ) ).mul( 0.5 ).add( 0.5 );
+
+					surf.color = mix( color( 0x2fb5a8 ), color( 0x7fd6c8 ), pale.mul( 0.45 ) );
+					surf.color = mix( surf.color, color( 0x54462f ), matrix.mul( 0.85 ) );
+					surf.roughness = float( 0.28 ).add( matrix.mul( 0.3 ) );
+					surf.clearcoat = float( 0.6 );
+					surf.clearcoatRoughness = float( 0.15 );
+					surf.height.push( ( q ) => veins( q, 4.2, 5, 33.3 ).mul( - 1.4 ) );
+					surf.bumpScale = 0.0012;
+
+				} ],
+
+				[ 'Amber', ( surf ) => {
+
+					const p = positionLocal;
+					const refracted = refract( viewIncident(), normalWorld, 1 / 1.54 );
+
+					const flow = fbm( vec3( p.x.mul( 2.2 ), p.y.mul( 5.5 ), p.z.mul( 2.2 ) ).add( refracted.mul( 0.4 ) ).add( 4.4 ) ).mul( 0.5 ).add( 0.5 );
+					const motes = smoothstep( 0.72, 0.8, fbm( p.add( refracted.mul( 0.18 ) ).mul( 16 ).add( 9.2 ), 2 ).mul( 0.5 ).add( 0.5 ) );
+
+					surf.color = mix( color( 0xe8a13e ), color( 0xb35f14 ), flow.mul( 0.7 ) );
+					surf.color = mix( surf.color, color( 0x3d2408 ), motes.mul( 0.8 ) );
+					surf.roughness = float( 0.06 );
+					surf.clearcoat = float( 1 );
+					surf.clearcoatRoughness = float( 0.04 );
+					surf.emissive = color( 0xffb24a ).mul( flow.oneMinus() ).mul( 0.14 );
+					surf.aoStrength = 0.3;
+					surf.props = { transmission: 0.85, thickness: 0.7, ior: 1.54, attenuationColor: new THREE.Color( 0xcf7d1c ), attenuationDistance: 1.1, envMapIntensity: 1.2 };
+
+				} ],
+
+				[ 'Opal', ( surf ) => {
+
+					const p = positionLocal;
+					const facing = normalWorld.dot( viewIncident().negate() ).clamp();
+
+					const patch = smoothstep( 0.52, 0.72, fbm( p.mul( 5.4 ).add( 7.7 ) ).mul( 0.5 ).add( 0.5 ) );
+					const fire = spectrum( cells( p, 6.5 ).mul( 0.8 ).add( facing.mul( 1.3 ) ) );
+
+					surf.color = mix( color( 0xf4f1ea ), color( 0xe4dfe8 ), fbm( p.mul( 3 ) ).mul( 0.5 ).add( 0.5 ) );
+					surf.roughness = float( 0.07 );
+					surf.clearcoat = float( 1 );
+					surf.clearcoatRoughness = float( 0.05 );
+					surf.emissive = fire.mul( patch ).mul( 0.65 );
+					surf.aoStrength = 0.35;
+					surf.props = { transmission: 0.3, thickness: 0.4, ior: 1.45, attenuationColor: new THREE.Color( 0xf3e9df ), attenuationDistance: 2, envMapIntensity: 1.15 };
+
+				} ],
+
+				[ 'Sandstone', ( surf ) => {
+
+					const p = positionLocal;
+
+					const strata = bands( p, vec3( 0.12, 1, 0.08 ), 38, 0.9, 6.6 );
+					const grit = mx_noise_float( p.mul( 130 ).add( 3.1 ) ).mul( 0.5 ).add( 0.5 );
+
+					surf.color = mix( color( 0xc89b6a ), color( 0x9c6f45 ), strata.pow( 1.6 ) );
+					surf.color = surf.color.mul( grit.mul( 0.14 ).add( 0.93 ) );
+					surf.roughness = float( 0.88 ).add( grit.mul( 0.1 ) ).clamp( 0, 1 );
+					surf.height.push( ( q ) => bands( q, vec3( 0.12, 1, 0.08 ), 38, 0.9, 6.6 ).pow( 3 ).mul( 1 ).add( mx_noise_float( q.mul( 130 ).add( 3.1 ) ).mul( 0.4 ) ) );
+					surf.bumpScale = 0.0012;
+
+				} ],
+
+				[ 'Basalt', ( surf ) => {
+
+					const p = positionLocal;
+
+					const vesicles = smoothstep( 0.55, 0.85, fbm( p.mul( 26 ).add( 5.5 ), 2 ).mul( 0.5 ).add( 0.5 ) );
+					const patches = fbm( p.mul( 4 ).add( 19 ) ).mul( 0.5 ).add( 0.5 );
+
+					surf.color = mix( color( 0x2a2b2e ), color( 0x3a3c40 ), patches.mul( 0.6 ) );
+					surf.color = surf.color.mul( vesicles.mul( 0.45 ).oneMinus() );
+					surf.roughness = float( 0.92 );
+					surf.height.push( ( q ) => smoothstep( 0.55, 0.85, fbm( q.mul( 26 ).add( 5.5 ), 2 ).mul( 0.5 ).add( 0.5 ) ).mul( - 2.2 ) );
+					surf.bumpScale = 0.0022;
+
+				} ],
+
+				[ 'Geode', ( surf ) => {
+
+					const p = positionLocal;
+
+					const pocket = smoothstep( 0.52, 0.72, fbm( p.mul( 3.4 ).add( 11.2 ) ).mul( 0.5 ).add( 0.5 ) );
+					const crystal = glints( p, 160, 30 ).clamp();
+
+					surf.color = mix( color( 0x4a4c52 ), color( 0x180d2c ), pocket );
+					surf.color = mix( surf.color, color( 0x6a3fb0 ), crystal.mul( pocket ) );
+					surf.roughness = mix( float( 0.75 ), float( 0.15 ), pocket );
+					surf.clearcoat = pocket.mul( 0.9 );
+					surf.clearcoatRoughness = float( 0.08 );
+					surf.emissive = color( 0xb07ce8 ).mul( crystal ).mul( pocket ).mul( 1.8 ).add( color( 0x8f9298 ).mul( pocket.mul( pocket.oneMinus() ) ).mul( 0.35 ) );
+					surf.height.push( ( q ) => smoothstep( 0.52, 0.72, fbm( q.mul( 3.4 ).add( 11.2 ) ).mul( 0.5 ).add( 0.5 ) ).mul( - 4.5 ) );
+					surf.bumpScale = 0.0032;
+
+				} ],
+
+				[ 'Meteorite', ( surf ) => {
+
+					const p = positionLocal;
+					const bevel = bevelMask();
+
+					const web1 = smoothstep( 0.32, 0.68, bands( p, vec3( 1, 0.4, 0.25 ), 17, 3.4, 2.2 ) );
+					const web2 = smoothstep( 0.32, 0.68, bands( p, vec3( - 0.3, 1, 0.45 ), 15, 3.8, 7.9 ) );
+					const widman = web1.mul( web2 ).add( web1.oneMinus().mul( web2.oneMinus() ) ).mul( 0.9 );
+					const crust = bevel.mul( fbm( p.mul( 8 ) ).mul( 0.25 ).add( 0.75 ) );
+
+					surf.color = mix( color( 0x686c74 ), color( 0xa3a9b2 ), widman );
+					surf.color = mix( surf.color, color( 0x241d16 ), crust.mul( 0.85 ) );
+					surf.metalness = float( 1 ).sub( crust.mul( 0.7 ) );
+					surf.roughness = float( 0.34 ).add( widman.mul( 0.08 ) ).add( crust.mul( 0.5 ) ).clamp( 0, 1 );
+					surf.height.push( ( q ) => mx_noise_float( q.mul( 18 ).add( 6 ) ).mul( 0.8 ) );
+					surf.bumpScale = 0.001;
+
+				} ],
+
+				[ 'Rock Salt', ( surf ) => {
+
+					const p = positionLocal;
+
+					const grain = fbm( p.mul( 9 ).add( 12.1 ) ).mul( 0.5 ).add( 0.5 );
+					const sparkle = glints( p, 95, 10 ).clamp();
+
+					surf.color = mix( color( 0xe8b8a8 ), color( 0xf6ded2 ), grain );
+					surf.roughness = float( 0.5 ).add( grain.mul( 0.2 ) );
+					surf.emissive = color( 0xffffff ).mul( sparkle ).mul( 0.5 ).add( color( 0xf4c4b0 ).mul( fresnel( 2.5 ) ).mul( 0.1 ) );
+					surf.aoStrength = 0.4;
+					surf.props = { transmission: 0.45, thickness: 0.55, ior: 1.49, attenuationColor: new THREE.Color( 0xe89c84 ), attenuationDistance: 1.4 };
+					surf.height.push( ( q ) => mx_noise_float( q.mul( 60 ) ).mul( 0.7 ) );
+					surf.bumpScale = 0.0012;
+
+				} ],
+
+				[ 'Flint', ( surf ) => {
+
+					const p = positionLocal;
+
+					const cortex = smoothstep( 0.58, 0.72, fbm( p.mul( 2.6 ).add( 17.3 ) ).mul( 0.5 ).add( 0.5 ) );
+					const waxFlow = fbm( p.mul( 6 ).add( 8.8 ) ).mul( 0.5 ).add( 0.5 );
+
+					surf.color = mix( color( 0x474239 ), color( 0x5c5347 ), waxFlow.mul( 0.6 ) );
+					surf.color = mix( surf.color, color( 0xd9d2c0 ), cortex.mul( 0.9 ) );
+					surf.roughness = mix( float( 0.2 ), float( 0.92 ), cortex );
+					surf.clearcoat = cortex.oneMinus().mul( 0.6 );
+					surf.clearcoatRoughness = float( 0.12 );
+					surf.height.push( ( q ) => sin( fbm( q.mul( 4 ), 2 ).mul( 9 ).add( q.dot( vec3( 5, 2, 4 ) ) ) ).mul( 0.6 ) );
+					surf.bumpScale = 0.0011;
+
+				} ],
+
+				[ 'Coal', ( surf ) => {
+
+					const p = positionLocal;
+
+					const seams = veins( p, 3.2, 9, 41.7 );
+					const dust = fbm( p.mul( 40 ).add( 2 ), 2 ).mul( 0.5 ).add( 0.5 );
+
+					surf.color = mix( color( 0x121212 ), color( 0x1f2126 ), seams );
+					surf.color = surf.color.mul( dust.mul( 0.15 ).add( 0.88 ) );
+					surf.roughness = float( 0.92 ).sub( seams.mul( 0.8 ) ).clamp( 0.08, 1 );
+					surf.clearcoat = seams.mul( 0.9 );
+					surf.clearcoatRoughness = float( 0.08 );
+					surf.height.push( ( q ) => veins( q, 3.2, 9, 41.7 ).mul( - 1.6 ) );
+					surf.bumpScale = 0.0018;
+
+				} ],
+
+				[ 'Pumice', ( surf ) => {
+
+					const p = positionLocal;
+
+					const foamA = mx_worley_noise_float( p.mul( 34 ).add( 4.4 ) ).oneMinus().pow( 3 );
+					const foamB = mx_worley_noise_float( p.mul( 68 ).add( 9.1 ) ).oneMinus().pow( 3 );
+					const holes = foamA.mul( 0.7 ).add( foamB.mul( 0.5 ) ).clamp();
+
+					surf.color = mix( color( 0xb8b4aa ), color( 0x7e7a71 ), holes );
+					surf.roughness = float( 0.98 );
+					surf.aoStrength = 0.45;
+					surf.height.push( ( q ) => mx_worley_noise_float( q.mul( 34 ).add( 4.4 ) ).oneMinus().pow( 3 ).mul( - 2.4 ).sub( mx_worley_noise_float( q.mul( 68 ).add( 9.1 ) ).oneMinus().pow( 3 ).mul( 1.4 ) ) );
+					surf.bumpScale = 0.003;
+
+				} ],
+
+				[ 'Petrified Wood', ( surf ) => {
+
+					const p = positionLocal;
+
+					const rings = sin( p.yz.length().mul( 110 ).add( fbm( p.mul( 4 ).add( 3.3 ), 2 ).mul( 1.9 ) ) ).mul( 0.5 ).add( 0.5 );
+					const silica = smoothstep( 0.55, 0.8, fbm( p.mul( 3.1 ).add( 24.2 ) ).mul( 0.5 ).add( 0.5 ) );
+
+					surf.color = mix( color( 0x5c4330 ), color( 0x96755a ), rings );
+					surf.color = mix( surf.color, color( 0xb08a66 ), silica.mul( 0.55 ) );
+					surf.roughness = mix( float( 0.5 ), float( 0.1 ), silica );
+					surf.clearcoat = silica.mul( 0.9 );
+					surf.clearcoatRoughness = float( 0.06 );
+					surf.height.push( ( q ) => sin( q.yz.length().mul( 110 ).add( fbm( q.mul( 4 ).add( 3.3 ), 2 ).mul( 1.9 ) ) ).mul( 0.25 ) );
+					surf.bumpScale = 0.0005;
+
+				} ],
+
+				[ 'Ammonite', ( surf ) => {
+
+					const p = positionLocal;
+					const facing = normalWorld.dot( viewIncident().negate() ).clamp();
+
+					const swirlCenter = vec3( 0.34, - 0.3, 0.42 );
+					const d = p.sub( swirlCenter ).length();
+					const angle = atan( p.y.sub( swirlCenter.y ), p.x.sub( swirlCenter.x ) );
+					const ribs = sin( d.mul( 46 ).add( angle.mul( 3 ) ).add( fbm( p.mul( 5 ), 2 ).mul( 1.4 ) ) ).mul( 0.5 ).add( 0.5 );
+					const shell = smoothstep( 0.9, 0.35, d );
+
+					surf.color = mix( color( 0xcbbfa8 ), color( 0xa89577 ), fbm( p.mul( 3.5 ).add( 15 ) ).mul( 0.5 ).add( 0.5 ) );
+					surf.color = mix( surf.color, color( 0x86694a ), ribs.mul( shell ).mul( 0.5 ) );
+					surf.color = mix( surf.color, spectrum( d.mul( 2.4 ).add( facing.mul( 1 ) ) ).mul( 0.4 ).add( 0.5 ), smoothstep( 0.7, 0.95, ribs ).mul( shell ).mul( 0.65 ) );
+					surf.roughness = float( 0.5 ).sub( ribs.mul( shell ).mul( 0.35 ) );
+					surf.emissive = spectrum( d.mul( 2.4 ).add( facing.mul( 1 ) ) ).mul( smoothstep( 0.7, 0.95, ribs ) ).mul( shell ).mul( 0.14 );
+					surf.height.push( ( q ) => sin( q.sub( swirlCenter ).length().mul( 46 ).add( atan( q.y.sub( swirlCenter.y ), q.x.sub( swirlCenter.x ) ).mul( 3 ) ).add( fbm( q.mul( 5 ), 2 ).mul( 1.4 ) ) ).mul( smoothstep( 0.9, 0.35, q.sub( swirlCenter ).length() ) ) );
+					surf.bumpScale = 0.003;
+
+				} ],
+
+				[ 'Onyx', ( surf ) => {
+
+					const p = positionLocal;
+
+					const wave = sin( p.dot( vec3( 0.2, 1, 0.15 ) ).mul( 26 ).add( fbm( p.mul( 2.5 ).add( 6 ), 2 ).mul( 0.8 ) ) );
+					const bandsThin = smoothstep( 0.962, 0.992, wave );
+					const bandsSoft = smoothstep( 0.75, 0.96, wave ).mul( 0.08 );
+
+					surf.color = mix( color( 0x0b0b0f ), color( 0x2c2c34 ), bandsSoft );
+					surf.color = mix( surf.color, color( 0xe9e7e2 ), bandsThin.mul( 0.9 ) );
+					surf.roughness = float( 0.05 );
+					surf.clearcoat = float( 1 );
+					surf.clearcoatRoughness = float( 0.03 );
+
+				} ],
+
+				[ 'Rose Quartz', ( surf ) => {
+
+					const p = positionLocal;
+
+					const haze = fbm( p.mul( 4.4 ).add( 21.7 ) ).mul( 0.5 ).add( 0.5 );
+					const fracture = veins( p, 3, 12, 13.9 );
+
+					surf.color = mix( color( 0xe8a9b8 ), color( 0xf6d3da ), haze );
+					surf.color = mix( surf.color, color( 0xffffff ), fracture.mul( 0.4 ) );
+					surf.roughness = float( 0.14 ).add( haze.mul( 0.1 ) );
+					surf.clearcoat = float( 0.9 );
+					surf.clearcoatRoughness = float( 0.08 );
+					surf.emissive = color( 0xf0a8bc ).mul( fresnel( 2.2 ) ).mul( 0.12 );
+					surf.aoStrength = 0.35;
+					surf.props = { transmission: 0.5, thickness: 0.6, ior: 1.55, attenuationColor: new THREE.Color( 0xe08aa2 ), attenuationDistance: 1.6 };
+
+				} ],
+
+				// metals -------------------------------------------------------
+
+				[ 'Copper', ( surf ) => {
+
+					const p = positionLocal;
+					const bevel = bevelMask();
+
+					const smudge = fbm( p.mul( 7 ).add( 31.4 ) ).mul( 0.5 ).add( 0.5 );
+					const heat = bevel.mul( fbm( p.mul( 3 ).add( 8 ) ).mul( 0.5 ).add( 0.5 ) );
+
+					surf.color = hue( mix( color( 0xb45f27 ), color( 0xd98c4a ), smudge ), heat.mul( - 1.6 ) );
+					surf.metalness = float( 1 );
+					surf.roughness = float( 0.16 ).add( smudge.mul( 0.14 ) ).sub( bevel.mul( 0.06 ) ).clamp( 0.05, 1 );
+					surf.props = { envMapIntensity: 1.3 };
+					surf.height.push( ( q ) => fbm( q.mul( 30 ).add( 5 ), 2 ) );
+					surf.bumpScale = 0.0006;
+
+				} ],
+
+				[ 'Verdigris', ( surf ) => {
+
+					const p = positionLocal;
+					const bevel = bevelMask();
+
+					const crust = smoothstep( 0.35, 0.65, fbm( p.mul( 4.4 ).add( 12.7 ) ).mul( 0.5 ).add( 0.5 ).add( attribute( 'pipAo' ).mul( 0.3 ) ) );
+					const worn = bevel.mul( fbm( p.mul( 9 ) ).mul( 0.3 ).add( 0.7 ) );
+					const exposure = worn.mul( crust.oneMinus().mul( 0.4 ).add( 0.6 ) );
+
+					surf.color = mix( color( 0x3d2f1e ), color( 0x3fae8c ), crust );
+					surf.color = mix( surf.color, color( 0x77e0bd ), crust.mul( fbm( p.mul( 11 ).add( 3 ) ).mul( 0.5 ).add( 0.5 ) ).mul( 0.4 ) );
+					surf.color = mix( surf.color, color( 0xc79a52 ), exposure );
+					surf.metalness = mix( float( 0.9 ), float( 0.05 ), crust ).add( exposure.mul( 0.6 ) ).clamp();
+					surf.roughness = mix( float( 0.35 ), float( 0.9 ), crust ).sub( exposure.mul( 0.4 ) ).clamp( 0.1, 1 );
+					surf.height.push( ( q ) => smoothstep( 0.35, 0.65, fbm( q.mul( 4.4 ).add( 12.7 ) ).mul( 0.5 ).add( 0.5 ) ).mul( 1.6 ).add( fbm( q.mul( 22 ) ).mul( 0.5 ) ) );
+					surf.bumpScale = 0.0022;
+
+				} ],
+
+				[ 'Rust', ( surf ) => {
+
+					const p = positionLocal;
+
+					const decay = fbm( p.mul( 3.6 ).add( 44.1 ) ).mul( 0.5 ).add( 0.5 );
+					const flakes = smoothstep( 0.35, 0.75, fbm( p.mul( 12 ).add( 7.2 ), 2 ).mul( 0.5 ).add( 0.5 ) );
+					const remnant = smoothstep( 0.72, 0.85, decay.oneMinus() );
+
+					surf.color = mix( color( 0x5e2c14 ), color( 0xa8542a ), flakes );
+					surf.color = mix( surf.color, color( 0xc97c3f ), flakes.mul( decay ).mul( 0.5 ) );
+					surf.color = mix( surf.color, color( 0x8f9298 ), remnant );
+					surf.metalness = remnant.mul( 0.9 );
+					surf.roughness = float( 0.9 ).sub( remnant.mul( 0.5 ) );
+					surf.aoStrength = 0.65;
+					surf.height.push( ( q ) => fbm( q.mul( 12 ).add( 7.2 ), 2 ).mul( 1.6 ).add( fbm( q.mul( 45 ) ).mul( 0.6 ) ) );
+					surf.bumpScale = 0.0028;
+
+				} ],
+
+				[ 'Chrome', ( surf ) => {
+
+					const p = positionLocal;
+
+					const smudge = fbm( vec3( p.x.mul( 3 ), p.y.mul( 14 ), p.z.mul( 3 ) ).add( 9.4 ) ).mul( 0.5 ).add( 0.5 );
+
+					surf.color = mix( color( 0xeef1f5 ), color( 0xc9ced6 ), smudge.mul( 0.4 ) );
+					surf.metalness = float( 1 );
+					surf.roughness = float( 0.03 ).add( smudge.mul( 0.07 ) );
+					surf.props = { envMapIntensity: 1.4 };
+
+				} ],
+
+				[ 'Brushed Steel', ( surf ) => {
+
+					const p = positionLocal;
+
+					const brushing = mx_noise_float( vec3( p.x.mul( 5 ), p.y.mul( 340 ), p.z.mul( 5 ) ).add( 2.2 ) );
+					const patches = fbm( p.mul( 4 ).add( 17 ) ).mul( 0.5 ).add( 0.5 );
+
+					surf.color = mix( color( 0xaab0b8 ), color( 0xc6ccd4 ), brushing.mul( 0.5 ).add( 0.5 ).mul( 0.4 ).add( patches.mul( 0.2 ) ) );
+					surf.metalness = float( 1 );
+					surf.roughness = float( 0.24 ).add( brushing.abs().mul( 0.16 ) );
+					surf.height.push( ( q ) => mx_noise_float( vec3( q.x.mul( 5 ), q.y.mul( 340 ), q.z.mul( 5 ) ).add( 2.2 ) ).mul( 0.35 ) );
+					surf.bumpScale = 0.0005;
+
+				} ],
+
+				[ 'Damascus', ( surf ) => {
+
+					const p = positionLocal;
+
+					const fold = sin( fbm( p.mul( 2.1 ).add( 5.5 ) ).mul( 13 ) ).mul( 0.5 ).add( 0.5 );
+					const fine = sin( fbm( p.mul( 2.1 ).add( 5.5 ) ).mul( 13 ).add( fbm( p.mul( 9 ), 2 ).mul( 2 ) ) ).mul( 0.5 ).add( 0.5 );
+
+					surf.color = mix( color( 0x3f444c ), color( 0xaab2bc ), fold.mul( 0.7 ).add( fine.mul( 0.3 ) ) );
+					surf.metalness = float( 1 );
+					surf.roughness = mix( float( 0.42 ), float( 0.16 ), fold );
+					surf.height.push( ( q ) => sin( fbm( q.mul( 2.1 ).add( 5.5 ) ).mul( 13 ) ).mul( 0.5 ) );
+					surf.bumpScale = 0.0007;
+
+				} ],
+
+				[ 'Mercury', ( surf ) => {
+
+					surf.color = color( 0xdfe4ea );
+					surf.metalness = float( 1 );
+					surf.roughness = float( 0.02 );
+					surf.props = { envMapIntensity: 1.5 };
+					surf.height.push( ( q ) => fbm( q.mul( 4.5 ).add( vec3( time.mul( 0.35 ), time.mul( 0.22 ), 0 ) ), 2 ).mul( 2 ).add( sin( q.length().mul( 24 ).sub( time.mul( 2.2 ) ) ).mul( 0.35 ) ) );
+					surf.bumpScale = 0.004;
+
+				} ],
+
+				[ 'Bismuth', ( surf ) => {
+
+					const p = positionLocal;
+
+					const terrace = floor( fbm( p.mul( 3.1 ).add( 6.8 ), 2 ).mul( 5 ) ).div( 5 );
+					const rainbow = spectrum( terrace.mul( 0.85 ).add( 0.12 ) );
+
+					surf.color = mix( rainbow, color( 0xd8dce2 ), 0.25 );
+					surf.metalness = float( 1 );
+					surf.roughness = float( 0.16 ).add( mx_noise_float( p.mul( 40 ) ).abs().mul( 0.08 ) );
+					surf.props = { envMapIntensity: 1.25, iridescence: 0.5, iridescenceIOR: 2.2 };
+					surf.height.push( ( q ) => floor( fbm( q.mul( 3.1 ).add( 6.8 ), 2 ).mul( 5 ) ).mul( 1.4 ) );
+					surf.bumpScale = 0.0025;
+
+				} ],
+
+				[ 'Bronze', ( surf ) => {
+
+					const p = positionLocal;
+					const bevel = bevelMask();
+
+					const grime = fbm( p.mul( 5.2 ).add( 27.3 ) ).mul( 0.5 ).add( 0.5 ).mul( 0.6 ).add( attribute( 'pipAo' ).mul( 0.5 ) ).clamp();
+
+					surf.color = mix( color( 0x8c6a3f ), color( 0x4a3a22 ), grime );
+					surf.color = mix( surf.color, color( 0xd8b878 ), bevel.mul( 0.6 ) );
+					surf.metalness = float( 1 );
+					surf.roughness = float( 0.28 ).add( grime.mul( 0.3 ) ).sub( bevel.mul( 0.15 ) ).clamp( 0.08, 1 );
+					surf.height.push( ( q ) => fbm( q.mul( 14 ).add( 4 ), 2 ).mul( 0.8 ) );
+					surf.bumpScale = 0.0008;
+
+				} ],
+
+				[ 'Crumpled Foil', ( surf ) => {
+
+					const p = positionLocal;
+
+					const wrinkles = fbm( p.mul( 26 ).add( 3.1 ), 2 );
+
+					surf.color = color( 0xdfe2e7 );
+					surf.metalness = float( 1 );
+					surf.roughness = float( 0.05 ).add( wrinkles.abs().mul( 0.07 ) );
+					surf.props = { envMapIntensity: 1.5 };
+					surf.height.push( ( q ) => fbm( q.mul( 7.5 ), 1 ).mul( 3 ).add( fbm( q.mul( 26 ).add( 3.1 ), 2 ).mul( 0.3 ) ) );
+					surf.bumpScale = 0.004;
+
+				} ],
+
+				// woods --------------------------------------------------------
+
+				[ 'Oak', ( surf ) => {
+
+					woodSurf( surf, { light: 0xb98e5a, dark: 0x74501f, ringFrequency: 34, warp: 2.6, rough: 0.5, gloss: 0.35, seed: 3.1 } );
+
+				} ],
+
+				[ 'Ebony', ( surf ) => {
+
+					woodSurf( surf, { light: 0x3a2e26, dark: 0x140f0b, ringFrequency: 44, warp: 2.0, rough: 0.28, gloss: 0.7, seed: 8.4 } );
+
+				} ],
+
+				[ 'Cherry', ( surf ) => {
+
+					woodSurf( surf, { light: 0xb06a42, dark: 0x76341c, ringFrequency: 40, warp: 2.2, rough: 0.34, gloss: 0.55, seed: 15.9 } );
+
+				} ],
+
+				[ 'Birch', ( surf ) => {
+
+					woodSurf( surf, { light: 0xe9dab9, dark: 0xc9b48b, ringFrequency: 28, warp: 1.6, rough: 0.55, gloss: 0.2, seed: 22.7 } );
+
+					const p = positionLocal;
+					const lenticels = smoothstep( 0.12, 0.02, mx_noise_float( vec3( p.x.mul( 9 ), p.y.mul( 90 ), p.z.mul( 9 ) ).add( 5.5 ) ).abs() ).mul( smoothstep( 0.45, 0.75, fbm( p.mul( 7 ).add( 12 ) ).mul( 0.5 ).add( 0.5 ) ) );
+					surf.color = mix( surf.color, color( 0x54432e ), lenticels.mul( 0.8 ) );
+
+				} ],
+
+				[ 'Driftwood', ( surf ) => {
+
+					woodSurf( surf, { light: 0xa39c92, dark: 0x4f4b44, ringFrequency: 46, warp: 2.2, rough: 0.92, gloss: 0, seed: 31.2 } );
+
+					const p5 = positionLocal;
+					const splits = smoothstep( 0, 0.03, mx_noise_float( vec3( p5.x.mul( 2.5 ), p5.y.mul( 40 ), p5.z.mul( 40 ) ).add( 7.7 ) ).abs() ).oneMinus()
+						.mul( smoothstep( 0.4, 0.7, fbm( p5.mul( 3 ).add( 4.1 ) ).mul( 0.5 ).add( 0.5 ) ) );
+					surf.color = mix( surf.color, color( 0x35322d ), splits.mul( 0.85 ) );
+					surf.height.push( ( q ) => smoothstep( 0, 0.03, mx_noise_float( vec3( q.x.mul( 2.5 ), q.y.mul( 40 ), q.z.mul( 40 ) ).add( 7.7 ) ).abs() ).oneMinus().mul( - 3.5 ) );
+					surf.bumpScale = 0.0028;
+
+				} ],
+
+				// glass --------------------------------------------------------
+
+				[ 'Sea Glass', ( surf ) => {
+
+					const p = positionLocal;
+					const bevel = bevelMask();
+
+					const wear = fbm( p.mul( 8 ).add( 9.3 ), 2 ).mul( 0.5 ).add( 0.5 );
+
+					surf.color = mix( color( 0x9ecfae ), color( 0xc4e6cd ), wear.mul( 0.5 ) );
+					surf.roughness = float( 0.5 ).add( wear.mul( 0.15 ) ).add( bevel.mul( 0.1 ) );
+					surf.aoStrength = 0.3;
+					surf.props = { transmission: 0.75, thickness: 0.7, ior: 1.5, attenuationColor: new THREE.Color( 0x77b98a ), attenuationDistance: 1.4 };
+					surf.height.push( ( q ) => mx_noise_float( q.mul( 70 ) ).mul( 0.5 ).add( fbm( q.mul( 12 ), 2 ).mul( 0.5 ) ) );
+					surf.bumpScale = 0.001;
+
+				} ],
+
+				[ 'Stained Glass', ( surf ) => {
+
+					const p = positionLocal;
+
+					const wobble = fbm( p.mul( 2.4 ).add( 6.6 ), 2 ).mul( 0.12 );
+					const panes = cells( p.add( wobble ), 2.7, 4.1 );
+					const came = latticeLines( p.add( wobble ), 2.7, 0.05 );
+
+					const paneColor = hue( color( 0xc23c2e ), panes.mul( 6.28 ) );
+
+					surf.color = mix( paneColor, color( 0x26262b ), came.mul( 0.92 ) );
+					surf.metalness = came.mul( 0.7 );
+					surf.roughness = mix( float( 0.05 ), float( 0.55 ), came );
+					surf.emissive = paneColor.mul( came.oneMinus() ).mul( 0.12 );
+					surf.props = { transmission: 0.8, thickness: 0.5, ior: 1.52, attenuationColor: new THREE.Color( 0xffffff ), attenuationDistance: 3 };
+					surf.height.push( ( q ) => latticeLines( q.add( fbm( q.mul( 2.4 ).add( 6.6 ), 2 ).mul( 0.12 ) ), 2.7, 0.05 ).mul( 1.2 ) );
+					surf.bumpScale = 0.0018;
+
+				} ],
+
+				[ 'Ice', ( surf ) => {
+
+					const p = positionLocal;
+					const bevel = bevelMask();
+
+					const cracksA = veins( p, 2.6, 12, 3.4 );
+					const cracksB = veins( p, 5.2, 15, 19.8 );
+					const frost = bevel.mul( fbm( p.mul( 10 ).add( 2 ), 2 ).mul( 0.3 ).add( 0.7 ) );
+
+					surf.color = mix( color( 0xf4fafd ), color( 0xdcefF8 ), fbm( p.mul( 4 ) ).mul( 0.5 ).add( 0.5 ) );
+					surf.color = mix( surf.color, color( 0xffffff ), cracksA.mul( 0.5 ).add( cracksB.mul( 0.3 ) ) );
+					surf.roughness = float( 0.03 ).add( frost.mul( 0.5 ) ).add( cracksA.mul( 0.2 ) );
+					surf.emissive = color( 0xeaf6ff ).mul( cracksA.mul( 0.7 ).add( cracksB.mul( 0.4 ) ) ).mul( 0.18 );
+					surf.aoStrength = 0.2;
+					surf.props = { transmission: 1, thickness: 0.8, ior: 1.31, attenuationColor: new THREE.Color( 0xd8edf6 ), attenuationDistance: 2.4, envMapIntensity: 1.2 };
+					surf.height.push( ( q ) => veins( q, 2.6, 12, 3.4 ).mul( - 0.8 ) );
+					surf.bumpScale = 0.001;
+
+				} ],
+
+				[ 'Frosted Glass', ( surf ) => {
+
+					const p = positionLocal;
+
+					const sugar = glints( p, 130, 5 ).clamp();
+
+					surf.color = color( 0xfbfdfe );
+					surf.roughness = float( 0.42 ).add( mx_noise_float( p.mul( 55 ) ).mul( 0.06 ) );
+					surf.emissive = color( 0xffffff ).mul( sugar ).mul( 0.25 );
+					surf.aoStrength = 0.25;
+					surf.props = { transmission: 1, thickness: 0.6, ior: 1.5, attenuationColor: new THREE.Color( 0xffffff ), attenuationDistance: 4 };
+
+				} ],
+
+				[ 'Uranium Glass', ( surf ) => {
+
+					const p = positionLocal;
+
+					const swirl = fbm( p.mul( 3.4 ).add( 13.1 ) ).mul( 0.5 ).add( 0.5 );
+
+					surf.color = mix( color( 0xd2f26a ), color( 0xa8e23e ), swirl );
+					surf.roughness = float( 0.04 );
+					surf.clearcoat = float( 1 );
+					surf.clearcoatRoughness = float( 0.04 );
+					surf.emissive = color( 0x86e824 ).mul( swirl.mul( 0.4 ).add( 0.35 ) ).mul( fresnel( 1.6 ).mul( 0.6 ).add( 0.4 ) ).mul( 0.55 );
+					surf.aoStrength = 0.2;
+					surf.props = { transmission: 0.9, thickness: 0.7, ior: 1.5, attenuationColor: new THREE.Color( 0x9ed61e ), attenuationDistance: 1.8 };
+
+				} ],
+
+				[ 'Murano Swirl', ( surf ) => {
+
+					const p = positionLocal;
+
+					const angle = atan( p.z, p.x );
+					const swirl = sin( angle.mul( 5 ).add( p.y.mul( 7 ) ).add( fbm( p.mul( 3 ).add( 2.2 ) ).mul( 3.2 ) ).add( p.length().mul( 6 ) ) ).mul( 0.5 ).add( 0.5 );
+					const cane = spectrum( swirl.mul( 0.55 ).add( cells( p, 1.8, 6.3 ).mul( 0.45 ) ) );
+
+					surf.color = mix( color( 0xf6f4f0 ), cane, smoothstep( 0.55, 0.72, swirl ).mul( 0.95 ) );
+					surf.roughness = float( 0.05 );
+					surf.clearcoat = float( 1 );
+					surf.clearcoatRoughness = float( 0.03 );
+					surf.emissive = cane.mul( smoothstep( 0.6, 0.8, swirl ) ).mul( 0.18 );
+					surf.props = { transmission: 0.45, thickness: 0.6, ior: 1.5, attenuationColor: new THREE.Color( 0xf2ece2 ), attenuationDistance: 2.5 };
+
+				} ],
+
+				// organics -----------------------------------------------------
+
+				[ 'Bone', ( surf ) => {
+
+					const p = positionLocal;
+
+					const aged = fbm( p.mul( 2.4 ).add( 33.1 ) ).mul( 0.5 ).add( 0.5 );
+					const porous = smoothstep( 0, 0.06, mx_noise_float( vec3( p.x.mul( 120 ), p.y.mul( 12 ), p.z.mul( 120 ) ).add( 4.4 ) ).abs() ).oneMinus()
+						.mul( smoothstep( 0.45, 0.7, fbm( p.mul( 4.5 ).add( 8.8 ) ).mul( 0.5 ).add( 0.5 ) ) );
+					const cracks = veins( p, 5.5, 16, 27.2 );
+
+					surf.color = mix( color( 0xe9e1cd ), color( 0xc9ba9b ), aged );
+					surf.color = mix( surf.color, color( 0x8f8065 ), porous.mul( 0.55 ).add( cracks.mul( 0.3 ) ) );
+					surf.roughness = float( 0.42 ).add( porous.mul( 0.3 ) );
+					surf.clearcoat = float( 0.3 );
+					surf.clearcoatRoughness = float( 0.3 );
+					surf.height.push( ( q ) => smoothstep( 0, 0.06, mx_noise_float( vec3( q.x.mul( 120 ), q.y.mul( 12 ), q.z.mul( 120 ) ).add( 4.4 ) ).abs() ).oneMinus().mul( - 1.2 ) );
+					surf.bumpScale = 0.0014;
+
+				} ],
+
+				[ 'Coral', ( surf ) => {
+
+					const p = positionLocal;
+					const bevel = bevelMask();
+
+					const ridges = veins( p, 9, 5, 14.4 );
+					const pits = mx_worley_noise_float( p.mul( 42 ).add( 6.1 ) ).oneMinus().pow( 4 );
+
+					surf.color = mix( color( 0xd4553a ), color( 0xf0907a ), bevel.mul( 0.6 ).add( ridges.mul( 0.25 ) ) );
+					surf.color = surf.color.mul( pits.mul( 0.4 ).oneMinus() );
+					surf.roughness = float( 0.78 );
+					surf.aoStrength = 0.5;
+					surf.height.push( ( q ) => veins( q, 9, 5, 14.4 ).mul( 1.8 ).sub( mx_worley_noise_float( q.mul( 42 ).add( 6.1 ) ).oneMinus().pow( 4 ).mul( 1.5 ) ) );
+					surf.bumpScale = 0.0022;
+
+				} ],
+
+				[ 'Nacre', ( surf ) => {
+
+					const p = positionLocal;
+					const facing = normalWorld.dot( viewIncident().negate() ).clamp();
+
+					const growth = bands( p, vec3( 0.3, 1, 0.2 ), 18, 1.2, 9.9 );
+					const sheenColor = spectrum( facing.mul( 1.6 ).add( fbm( p.mul( 7 ).add( 3 ) ).mul( 0.4 ) ).add( growth.mul( 0.3 ) ) );
+
+					surf.color = mix( color( 0xf5f2ec ), sheenColor.mul( 0.5 ).add( 0.55 ), 0.4 );
+					surf.roughness = float( 0.1 ).add( growth.mul( 0.06 ) );
+					surf.clearcoat = float( 1 );
+					surf.clearcoatRoughness = float( 0.08 );
+					surf.emissive = sheenColor.mul( 0.12 ).mul( facing.mul( 0.6 ).add( 0.4 ) );
+					surf.props = { iridescence: 0.85, iridescenceIOR: 1.3, envMapIntensity: 1.2 };
+					surf.height.push( ( q ) => bands( q, vec3( 0.3, 1, 0.2 ), 18, 1.2, 9.9 ).mul( 0.3 ) );
+					surf.bumpScale = 0.0005;
+
+				} ],
+
+				[ 'Tortoiseshell', ( surf ) => {
+
+					const p = positionLocal;
+
+					const blotch = fbm( p.mul( 3 ).add( 18.6 ) ).mul( 0.5 ).add( 0.5 );
+					const cores = smoothstep( 0.62, 0.85, blotch );
+
+					surf.color = mix( color( 0xd9993f ), color( 0x53270d ), smoothstep( 0.35, 0.7, blotch ) );
+					surf.color = mix( surf.color, color( 0x24100a ), cores );
+					surf.roughness = float( 0.07 );
+					surf.clearcoat = float( 1 );
+					surf.clearcoatRoughness = float( 0.04 );
+					surf.emissive = color( 0xd98a2e ).mul( smoothstep( 0.35, 0.7, blotch ).oneMinus() ).mul( fresnel( 2 ) ).mul( 0.15 );
+					surf.props = { transmission: 0.35, thickness: 0.5, ior: 1.55, attenuationColor: new THREE.Color( 0xb56a1e ), attenuationDistance: 1.2 };
+
+				} ],
+
+				[ 'Leather', ( surf ) => {
+
+					const p = positionLocal;
+					const bevel = bevelMask();
+
+					const pebble = mx_worley_noise_float( p.mul( 55 ).add( 3.3 ) );
+					const creases = veins( p, 2.8, 7, 41.5 );
+
+					surf.color = mix( color( 0x7a4a2b ), color( 0x5d3319 ), creases.mul( 0.8 ) );
+					surf.color = mix( surf.color, color( 0x9a6a42 ), bevel.mul( 0.5 ) );
+					surf.color = surf.color.mul( pebble.mul( 0.16 ).add( 0.9 ) );
+					surf.roughness = float( 0.62 ).sub( bevel.mul( 0.22 ) ).add( creases.mul( 0.15 ) );
+					surf.sheen = color( 0xb98a5a ).mul( 0.2 );
+					surf.sheenRoughness = float( 0.7 );
+					surf.height.push( ( q ) => mx_worley_noise_float( q.mul( 55 ).add( 3.3 ) ).mul( 1.2 ).add( veins( q, 2.8, 7, 41.5 ).mul( - 1.6 ) ) );
+					surf.bumpScale = 0.002;
+
+				} ],
+
+				[ 'Dragonhide', ( surf ) => {
+
+					const p = positionLocal;
+
+					const cellDist = mx_worley_noise_float( p.mul( 13 ).add( 2.2 ) );
+					const gap = smoothstep( 0.55, 0.8, cellDist );
+					const dome = smoothstep( 0.5, 0.05, cellDist );
+					const tint = cells( p, 13, 7.7 );
+
+					surf.color = hue( mix( color( 0x27553d ), color( 0x3f7a52 ), dome ), tint.sub( 0.5 ).mul( 0.3 ) );
+					surf.color = mix( surf.color, color( 0x0c1d16 ), gap.mul( 0.9 ) );
+					surf.roughness = mix( float( 0.32 ), float( 0.72 ), gap );
+					surf.clearcoat = dome.mul( 0.8 );
+					surf.clearcoatRoughness = float( 0.1 );
+					surf.height.push( ( q ) => mx_worley_noise_float( q.mul( 13 ).add( 2.2 ) ).pow( 1.5 ).mul( - 3.2 ) );
+					surf.bumpScale = 0.004;
+
+				} ],
+
+				[ 'Moss', ( surf ) => {
+
+					const p = positionLocal;
+
+					const patch = smoothstep( 0.35, 0.6, fbm( p.mul( 3.6 ).add( 9.4 ) ).mul( 0.5 ).add( 0.5 ) );
+					const fuzz = mx_noise_float( p.mul( 160 ).add( 2.2 ) ).mul( 0.5 ).add( 0.5 );
+					const stone = mix( color( 0x6f6c66 ), color( 0x8d8a82 ), fbm( p.mul( 6 ) ).mul( 0.5 ).add( 0.5 ) );
+					const green = mix( color( 0x3d6b24 ), color( 0x7aa63e ), fuzz );
+
+					surf.color = mix( stone, green, patch );
+					surf.roughness = mix( float( 0.7 ), float( 0.95 ), patch );
+					surf.sheen = color( 0x9ac45e ).mul( patch ).mul( 0.55 );
+					surf.sheenRoughness = float( 0.9 );
+					surf.aoStrength = 0.6;
+					surf.height.push( ( q ) => smoothstep( 0.35, 0.6, fbm( q.mul( 3.6 ).add( 9.4 ) ).mul( 0.5 ).add( 0.5 ) ).mul( 2 ).add( mx_noise_float( q.mul( 160 ).add( 2.2 ) ).mul( 0.8 ) ) );
+					surf.bumpScale = 0.0032;
+
+				} ],
+
+				[ 'Cork Bark', ( surf ) => {
+
+					const p = positionLocal;
+
+					const fissures = veins( vec3( p.x.mul( 1 ), p.y.mul( 0.35 ), p.z.mul( 1 ) ), 3.4, 5, 6.2 );
+					const plateaus = fbm( p.mul( 8 ).add( 15.5 ), 2 ).mul( 0.5 ).add( 0.5 );
+
+					surf.color = mix( color( 0x8a5f3a ), color( 0xb08454 ), plateaus );
+					surf.color = mix( surf.color, color( 0x33200f ), fissures.mul( 0.9 ) );
+					surf.roughness = float( 0.92 );
+					surf.aoStrength = 0.6;
+					surf.height.push( ( q ) => veins( vec3( q.x, q.y.mul( 0.35 ), q.z ), 3.4, 5, 6.2 ).mul( - 4 ).add( fbm( q.mul( 8 ).add( 15.5 ), 2 ) ) );
+					surf.bumpScale = 0.0035;
+
+				} ],
+
+				[ 'Honeycomb', ( surf ) => {
+
+					const p = positionLocal;
+
+					const comb = mx_worley_noise_float( p.mul( 7.5 ).add( 4.9 ) );
+					const wall = smoothstep( 0.5, 0.75, comb );
+					const honey = smoothstep( 0.42, 0.15, comb );
+
+					surf.color = mix( color( 0xd8a832 ), color( 0xf2cf6a ), wall );
+					surf.color = mix( surf.color, color( 0xb56a10 ), honey );
+					surf.roughness = mix( float( 0.55 ), float( 0.06 ), honey );
+					surf.clearcoat = honey.mul( 0.9 );
+					surf.clearcoatRoughness = float( 0.05 );
+					surf.emissive = color( 0xe89020 ).mul( honey ).mul( 0.3 );
+					surf.height.push( ( q ) => smoothstep( 0.5, 0.75, mx_worley_noise_float( q.mul( 7.5 ).add( 4.9 ) ) ).mul( 2.6 ) );
+					surf.bumpScale = 0.0035;
+
+				} ],
+
+				[ 'Eggshell', ( surf ) => {
+
+					const p = positionLocal;
+
+					const freckleA = mx_noise_float( p.mul( 60 ).add( 5.1 ) );
+					const freckleB = mx_noise_float( p.mul( 95 ).add( 21.7 ) );
+					const freckles = smoothstep( 0.16, 0.34, freckleA.mul( freckleB ) );
+
+					surf.color = mix( color( 0xf2e6d2 ), color( 0xe4d0b2 ), fbm( p.mul( 3 ) ).mul( 0.5 ).add( 0.5 ) );
+					surf.color = mix( surf.color, color( 0x6f4c2c ), freckles.mul( 0.75 ) );
+					surf.roughness = float( 0.58 );
+					surf.height.push( ( q ) => mx_noise_float( q.mul( 140 ) ).mul( 0.35 ) );
+					surf.bumpScale = 0.0006;
+
+				} ],
+
+				[ 'Scarab Shell', ( surf ) => {
+
+					const p = positionLocal;
+					const facing = normalWorld.dot( viewIncident().negate() ).clamp();
+
+					const sheenColor = spectrum( facing.mul( 1.3 ).add( fbm( p.mul( 5.5 ).add( 7.3 ) ).mul( 0.35 ) ) );
+					const seam = smoothstep( 0.015, 0.003, p.z.abs() ).mul( normalLocal.y.clamp() );
+
+					surf.color = mix( color( 0x0d2c17 ), sheenColor.mul( vec3( 0.3, 0.6, 0.45 ) ), facing.oneMinus().mul( 0.6 ).add( 0.25 ) );
+					surf.color = mix( surf.color, color( 0x061009 ), seam.mul( 0.8 ) );
+					surf.metalness = float( 0.85 );
+					surf.roughness = float( 0.14 ).add( seam.mul( 0.2 ) );
+					surf.clearcoat = float( 1 );
+					surf.clearcoatRoughness = float( 0.05 );
+					surf.emissive = sheenColor.mul( vec3( 0.2, 0.5, 0.35 ) ).mul( 0.15 );
+					surf.props = { envMapIntensity: 1.25 };
+
+				} ],
+
+				// liquids and soft bodies ----------------------------------------
+
+				[ 'Lava', ( surf ) => {
+
+					const p = positionLocal;
+
+					const field = fbm( p.mul( 4.2 ).add( 3.3 ) );
+					const molten = smoothstep( 0.16, 0.02, field.abs() );
+					const heat = fbm( p.mul( 2.1 ).add( 8.8 ) ).mul( 0.5 ).add( 0.5 );
+					const pulse = sin( time.mul( 1.2 ).add( heat.mul( 5 ) ) ).mul( 0.2 ).add( 0.8 );
+
+					surf.color = mix( color( 0x16110c ), color( 0x2c211a ), heat.mul( 0.6 ) );
+					surf.roughness = float( 0.85 ).sub( molten.mul( 0.4 ) );
+					surf.emissive = mix( color( 0xff3800 ), color( 0xffb63e ), heat ).mul( molten ).mul( pulse ).mul( 2.2 );
+					surf.aoStrength = 0.6;
+					surf.height.push( ( q ) => smoothstep( 0.16, 0.02, fbm( q.mul( 4.2 ).add( 3.3 ) ).abs() ).mul( - 2.4 ).add( fbm( q.mul( 9 ), 2 ).mul( 0.7 ) ) );
+					surf.bumpScale = 0.0028;
+
+				} ],
+
+				[ 'Abyss Water', ( surf ) => {
+
+					const p = positionLocal;
+					const bevel = bevelMask();
+
+					const caustics = fbm( p.mul( 5 ).add( vec3( time.mul( 0.35 ), 0, time.mul( 0.22 ) ) ) ).abs().oneMinus().clamp().pow( 6 );
+					const swell = fbm( p.mul( 2 ).add( vec3( 0, time.mul( 0.15 ), 0 ) ) ).mul( 0.5 ).add( 0.5 );
+					const foam = smoothstep( 0.55, 0.8, mx_noise_float( p.mul( 30 ).add( time.mul( 0.4 ) ) ).mul( 0.5 ).add( 0.5 ) ).mul( bevel );
+
+					surf.color = mix( color( 0x04202f ), color( 0x0a4258 ), swell );
+					surf.color = mix( surf.color, color( 0xd8f2f6 ), foam.mul( 0.8 ) );
+					surf.roughness = float( 0.05 ).add( foam.mul( 0.6 ) );
+					surf.emissive = color( 0x2fd8e8 ).mul( caustics ).mul( 0.45 );
+					surf.props = { transmission: 0.65, thickness: 1, ior: 1.33, attenuationColor: new THREE.Color( 0x0a5a70 ), attenuationDistance: 0.9 };
+					surf.height.push( ( q ) => fbm( q.mul( 6 ).add( vec3( time.mul( 0.3 ), 0, time.mul( 0.2 ) ) ), 2 ) );
+					surf.bumpScale = 0.0015;
+
+				} ],
+
+				[ 'Slime', ( surf ) => {
+
+					const p = positionLocal;
+					const refracted = refract( viewIncident(), normalWorld, 1 / 1.4 );
+
+					const bubbles = smoothstep( 0.62, 0.75, fbm( p.add( refracted.mul( 0.2 ) ).mul( 11 ).add( 6.6 ), 2 ).mul( 0.5 ).add( 0.5 ) );
+
+					surf.color = mix( color( 0x49b518 ), color( 0x77dd3a ), fbm( p.mul( 4 ).add( time.mul( 0.2 ) ) ).mul( 0.5 ).add( 0.5 ) );
+					surf.color = mix( surf.color, color( 0xc4f29a ), bubbles.mul( 0.5 ) );
+					surf.roughness = float( 0.06 );
+					surf.clearcoat = float( 1 );
+					surf.clearcoatRoughness = float( 0.03 );
+					surf.emissive = color( 0x54d81e ).mul( fresnel( 1.8 ).oneMinus() ).mul( 0.18 );
+					surf.aoStrength = 0.25;
+					surf.props = { transmission: 0.75, thickness: 0.8, ior: 1.4, attenuationColor: new THREE.Color( 0x3fae12 ), attenuationDistance: 1 };
+					surf.height.push( ( q ) => fbm( q.mul( 6.5 ).add( vec3( 0, time.mul( 0.5 ), 0 ) ), 2 ).mul( 1.4 ) );
+					surf.bumpScale = 0.0022;
+
+				} ],
+
+				[ 'Candle Wax', ( surf ) => {
+
+					const p = positionLocal;
+					const sides = normalLocal.y.abs().oneMinus();
+
+					const drips = mx_noise_float( vec3( p.x.mul( 26 ), p.y.mul( 1.8 ), p.z.mul( 26 ) ).add( 7.7 ) ).mul( 0.5 ).add( 0.5 ).mul( sides );
+					const pool = normalLocal.y.clamp().mul( smoothstep( 0.3, 0.45, p.y ) );
+
+					surf.color = mix( color( 0xf3ead6 ), color( 0xe6d8ba ), drips );
+					surf.roughness = float( 0.38 ).sub( pool.mul( 0.25 ) ).add( drips.mul( 0.1 ) );
+					surf.clearcoat = pool.mul( 0.6 ).add( 0.15 );
+					surf.clearcoatRoughness = float( 0.15 );
+					surf.emissive = color( 0xffd9a0 ).mul( fresnel( 2.2 ) ).mul( 0.14 );
+					surf.sheen = color( 0xfff2da ).mul( 0.3 );
+					surf.sheenRoughness = float( 0.6 );
+					surf.height.push( ( q ) => mx_noise_float( vec3( q.x.mul( 26 ), q.y.mul( 1.8 ), q.z.mul( 26 ) ).add( 7.7 ) ).mul( 1.6 ) );
+					surf.bumpScale = 0.003;
+
+				} ],
+
+				[ 'Soap', ( surf ) => {
+
+					const p = positionLocal;
+
+					const swirlA = fbm( p.mul( 2.8 ).add( 9.1 ) ).mul( 0.5 ).add( 0.5 );
+					const swirlB = fbm( p.mul( 4.4 ).add( 27.5 ) ).mul( 0.5 ).add( 0.5 );
+					const bubbles = glints( p, 70, 6 ).clamp();
+
+					surf.color = mix( color( 0xf2d8e0 ), color( 0xc4e4ea ), swirlA );
+					surf.color = mix( surf.color, color( 0xf6f0d2 ), swirlB.mul( 0.5 ) );
+					surf.roughness = float( 0.22 );
+					surf.clearcoat = float( 0.85 );
+					surf.clearcoatRoughness = float( 0.1 );
+					surf.emissive = color( 0xffffff ).mul( bubbles ).mul( 0.2 );
+					surf.props = { transmission: 0.25, thickness: 0.5, ior: 1.45, attenuationColor: new THREE.Color( 0xe8d0c0 ), attenuationDistance: 2 };
+
+				} ],
+
+				[ 'Crude Oil', ( surf ) => {
+
+					const p = positionLocal;
+					const facing = normalWorld.dot( viewIncident().negate() ).clamp();
+
+					const slickMask = smoothstep( 0.4, 0.75, fbm( p.mul( 3.2 ).add( vec3( time.mul( 0.08 ), 0, 0 ) ) ).mul( 0.5 ).add( 0.5 ) );
+					const slick = spectrum( fbm( p.mul( 4.5 ).add( 5.5 ) ).mul( 0.7 ).add( facing.mul( 1.2 ) ) );
+
+					surf.color = color( 0x0a0a0d );
+					surf.roughness = float( 0.03 );
+					surf.clearcoat = float( 1 );
+					surf.clearcoatRoughness = float( 0.02 );
+					surf.emissive = slick.mul( slickMask ).mul( facing.oneMinus().mul( 0.6 ).add( 0.25 ) ).mul( 0.5 );
+					surf.height.push( ( q ) => fbm( q.mul( 3 ).add( vec3( time.mul( 0.15 ), 0, time.mul( 0.1 ) ) ), 2 ).mul( 1.2 ) );
+					surf.bumpScale = 0.0012;
+
+				} ],
+
+				// candy --------------------------------------------------------
+
+				[ 'Chocolate', ( surf ) => {
+
+					const p = positionLocal;
+
+					const temper = bands( p, vec3( 0.6, 0.3, 1 ), 9, 1.8, 4.4 );
+					const fatBloom = attribute( 'pipAo' ).mul( 0.4 ).add( fbm( p.mul( 6 ).add( 3 ) ).mul( 0.5 ).add( 0.5 ).mul( 0.2 ) );
+
+					surf.color = mix( color( 0x421f0c ), color( 0x5f3315 ), temper.mul( 0.6 ) );
+					surf.color = mix( surf.color, color( 0x9a7d5e ), fatBloom.mul( 0.35 ) );
+					surf.roughness = float( 0.22 ).add( fatBloom.mul( 0.4 ) );
+					surf.clearcoat = float( 0.6 );
+					surf.clearcoatRoughness = float( 0.12 );
+
+				} ],
+
+				[ 'Caramel Swirl', ( surf ) => {
+
+					const p = positionLocal;
+
+					const angle = atan( p.z, p.x );
+					const swirl = sin( angle.mul( 3 ).add( p.length().mul( 11 ) ).add( fbm( p.mul( 3 ), 2 ).mul( 2.2 ) ) ).mul( 0.5 ).add( 0.5 );
+
+					surf.color = mix( color( 0xb56812 ), color( 0xf2d8a4 ), smoothstep( 0.55, 0.8, swirl ) );
+					surf.roughness = float( 0.07 );
+					surf.clearcoat = float( 1 );
+					surf.clearcoatRoughness = float( 0.04 );
+					surf.emissive = color( 0xd88a2a ).mul( swirl.oneMinus() ).mul( fresnel( 2 ) ).mul( 0.2 );
+					surf.props = { transmission: 0.45, thickness: 0.6, ior: 1.5, attenuationColor: new THREE.Color( 0xb05f08 ), attenuationDistance: 1 };
+
+				} ],
+
+				[ 'Candy Cane', ( surf ) => {
+
+					const p = positionLocal;
+
+					const stripe = smoothstep( 0.46, 0.54, fract( p.dot( vec3( 1.4, 1, 1.4 ) ).mul( 2.4 ) ) ).mul( smoothstep( 0.96, 0.88, fract( p.dot( vec3( 1.4, 1, 1.4 ) ).mul( 2.4 ) ) ) );
+					const sugar = glints( p, 120, 5 ).clamp();
+
+					surf.color = mix( color( 0xf7f3ee ), color( 0xd41f30 ), stripe );
+					surf.roughness = float( 0.06 );
+					surf.clearcoat = float( 1 );
+					surf.clearcoatRoughness = float( 0.03 );
+					surf.emissive = color( 0xffffff ).mul( sugar ).mul( 0.25 );
+
+				} ],
+
+				[ 'Gumdrop', ( surf ) => {
+
+					const p = positionLocal;
+
+					const sugarCoat = smoothstep( 0.25, 0.7, mx_noise_float( p.mul( 85 ).add( 4.4 ) ).mul( 0.5 ).add( 0.5 ) );
+
+					surf.color = mix( color( 0xd8304a ), color( 0xf27a8c ), sugarCoat.mul( 0.5 ) );
+					surf.roughness = float( 0.12 ).add( sugarCoat.mul( 0.5 ) );
+					surf.emissive = color( 0xffffff ).mul( glints( p, 110, 8 ).clamp() ).mul( 0.4 ).add( color( 0xe8506a ).mul( fresnel( 2 ) ).mul( 0.15 ) );
+					surf.aoStrength = 0.3;
+					surf.props = { transmission: 0.6, thickness: 0.7, ior: 1.42, attenuationColor: new THREE.Color( 0xc41430 ), attenuationDistance: 1.1 };
+					surf.height.push( ( q ) => mx_noise_float( q.mul( 85 ).add( 4.4 ) ).mul( 0.6 ) );
+					surf.bumpScale = 0.0012;
+
+				} ],
+
+				[ 'Liquorice', ( surf ) => {
+
+					const p = positionLocal;
+					const bevel = bevelMask();
+
+					const ridges = sin( p.dot( vec3( 0.3, 1, 0.2 ) ).mul( 52 ) ).mul( 0.5 ).add( 0.5 );
+
+					surf.color = mix( color( 0x141114 ), color( 0x221c20 ), ridges.mul( 0.5 ) );
+					surf.color = mix( surf.color, color( 0x353036 ), bevel.mul( 0.4 ) );
+					surf.roughness = float( 0.55 ).sub( bevel.mul( 0.2 ) );
+					surf.sheen = color( 0x555058 ).mul( 0.3 );
+					surf.sheenRoughness = float( 0.5 );
+					surf.height.push( ( q ) => sin( q.dot( vec3( 0.3, 1, 0.2 ) ).mul( 52 ) ).mul( 0.7 ) );
+					surf.bumpScale = 0.0014;
+
+				} ],
+
+				// tech ---------------------------------------------------------
+
+				[ 'Circuit Board', ( surf ) => {
+
+					const p = positionLocal;
+
+					const traceMask = step( 0.4, cells( p, 21, 8.2 ) );
+					const traces = latticeLines( p, 21, 0.016 ).mul( traceMask );
+					const pads = step( 0.9, cells( p, 21, 3.6 ) );
+					const glow = pads.mul( sin( time.mul( 2 ).add( cells( p, 21, 3.6 ).mul( 40 ) ) ).mul( 0.5 ).add( 0.5 ) );
+
+					surf.color = mix( color( 0x07361a ), color( 0x0c4a24 ), fbm( p.mul( 5 ) ).mul( 0.5 ).add( 0.5 ) );
+					surf.color = mix( surf.color, color( 0x2fc46a ), traces );
+					surf.color = mix( surf.color, color( 0xe2ba52 ), pads );
+					surf.metalness = pads.mul( 0.9 ).add( traces.mul( 0.4 ) ).clamp();
+					surf.roughness = float( 0.35 ).sub( pads.mul( 0.18 ) );
+					surf.clearcoat = float( 0.9 );
+					surf.clearcoatRoughness = float( 0.1 );
+					surf.emissive = color( 0xffb43e ).mul( glow ).mul( 0.6 ).add( color( 0x2fc46a ).mul( traces ).mul( 0.12 ) );
+					surf.height.push( ( q ) => latticeLines( q, 21, 0.016 ).mul( step( 0.4, cells( q, 21, 8.2 ) ) ).mul( 0.7 ) );
+					surf.bumpScale = 0.0009;
+
+				} ],
+
+				[ 'Hologram', ( surf ) => {
+
+					const p = positionLocal;
+
+					const scan = sin( p.y.mul( 240 ).sub( time.mul( 5 ) ) ).mul( 0.5 ).add( 0.5 );
+					const bandJump = step( 0.965, mx_noise_float( vec3( floor( p.y.mul( 14 ) ), time.mul( 1.7 ), 3 ) ).mul( 0.5 ).add( 0.5 ) );
+					const flicker = mx_noise_float( vec3( time.mul( 9 ), 1.5, 0 ) ).mul( 0.15 ).add( 0.88 );
+
+					surf.color = color( 0x8fd4ea );
+					surf.roughness = float( 0.05 );
+					surf.emissive = color( 0x35d4ff ).mul( scan.mul( 0.35 ).add( 0.25 ).add( bandJump.mul( 0.8 ) ) ).mul( flicker ).mul( fresnel( 1.5 ).mul( 1.2 ).add( 0.4 ) );
+					surf.aoStrength = 0.1;
+					surf.props = { transmission: 0.92, thickness: 0.4, ior: 1.2, attenuationColor: new THREE.Color( 0xbde8f4 ), attenuationDistance: 3, iridescence: 0.3, iridescenceIOR: 1.4 };
+
+				} ],
+
+				[ 'Carbon Fiber', ( surf ) => {
+
+					const p = positionLocal;
+
+					const towA = floor( p.dot( vec3( 1, 0.15, 0.1 ) ).mul( 22 ) );
+					const towB = floor( p.dot( vec3( - 0.1, 0.2, 1 ) ).mul( 22 ) );
+					const checker = fract( towA.add( towB ).mul( 0.5 ) ).mul( 2 );
+					const streakA = mx_noise_float( vec3( p.x.mul( 6 ), p.y.mul( 300 ), p.z.mul( 300 ) ) ).abs();
+					const streakB = mx_noise_float( vec3( p.x.mul( 300 ), p.y.mul( 300 ), p.z.mul( 6 ) ) ).abs();
+					const weaveSheen = mix( streakA, streakB, checker );
+
+					surf.color = mix( color( 0x101318 ), color( 0x272d38 ), weaveSheen.mul( 0.9 ) );
+					surf.metalness = float( 0.4 );
+					surf.roughness = float( 0.24 ).add( weaveSheen.mul( 0.18 ) );
+					surf.clearcoat = float( 1 );
+					surf.clearcoatRoughness = float( 0.06 );
+					surf.height.push( ( q ) => fract( floor( q.dot( vec3( 1, 0.15, 0.1 ) ).mul( 22 ) ).add( floor( q.dot( vec3( - 0.1, 0.2, 1 ) ).mul( 22 ) ) ).mul( 0.5 ) ).mul( 0.5 ) );
+					surf.bumpScale = 0.0008;
+
+				} ],
+
+				[ 'Reactor Core', ( surf ) => {
+
+					const p = positionLocal;
+					const sides = normalLocal.y.abs().oneMinus();
+
+					const belt = smoothstep( 0.34, 0.22, p.y.abs() );
+					const vents = smoothstep( 0.08, 0.03, fract( p.x.add( p.z ).mul( 4 ).add( 0.5 ) ).sub( 0.5 ).abs() ).mul( sides ).mul( belt );
+					const grime = fbm( p.mul( 7 ).add( 22 ) ).mul( 0.5 ).add( 0.5 );
+					const surge = sin( time.mul( 1.6 ).add( p.x.mul( 3 ) ).add( p.z.mul( 2 ) ) ).mul( 0.25 ).add( 0.75 );
+
+					surf.color = mix( color( 0x191b1f ), color( 0x2a2d33 ), grime );
+					surf.color = mix( surf.color, color( 0x0a1218 ), vents.mul( 0.85 ) );
+					surf.metalness = float( 0.7 );
+					surf.roughness = float( 0.45 ).add( grime.mul( 0.15 ) );
+					surf.emissive = color( 0x2fa8ff ).mul( vents ).mul( surge ).mul( 1.8 );
+					surf.height.push( ( q ) => smoothstep( 0.08, 0.03, fract( q.x.add( q.z ).mul( 4 ).add( 0.5 ) ).sub( 0.5 ).abs() ).mul( smoothstep( 0.34, 0.22, q.y.abs() ) ).mul( - 2.2 ) );
+					surf.bumpScale = 0.0022;
+
+				} ],
+
+				[ 'Nanite Swarm', ( surf ) => {
+
+					const p = positionLocal;
+
+					const facets = cells( p, 34, 6.1 );
+					const crawl = step( 0.9, mx_cell_noise_float( p.mul( 34 ).add( floor( time.mul( 3 ) ).mul( 0.37 ) ) ) );
+					const ripple = sin( p.dot( vec3( 3, 5, 2 ) ).sub( time.mul( 1.4 ) ) ).mul( 0.5 ).add( 0.5 );
+
+					surf.color = mix( color( 0x272b31 ), color( 0x3c424b ), facets.mul( 0.7 ) );
+					surf.metalness = float( 1 );
+					surf.roughness = float( 0.28 ).add( facets.mul( 0.12 ) );
+					surf.emissive = color( 0x43e2c4 ).mul( crawl ).mul( ripple ).mul( 0.9 );
+					surf.height.push( ( q ) => mx_cell_noise_float( q.mul( 34 ).add( 6.1 ) ).mul( 0.8 ) );
+					surf.bumpScale = 0.0014;
+
+				} ],
+
+				[ 'Starship Hull', ( surf ) => {
+
+					const p = positionLocal;
+
+					const panelTint = cells( p, 2.3, 9.4 );
+					const panelLines = latticeLines( p, 2.3, 0.02 );
+					const scorch = smoothstep( 0.4, 0.85, fbm( vec3( p.x.mul( 1.6 ), p.y.mul( 7 ), p.z.mul( 7 ) ).add( 5.2 ) ).mul( 0.5 ).add( 0.5 ) );
+
+					surf.color = mix( color( 0xaeb3ba ), color( 0x8d939c ), panelTint );
+					surf.color = mix( surf.color, color( 0x3a3025 ), scorch.mul( 0.55 ) );
+					surf.color = mix( surf.color, color( 0x54585e ), panelLines.mul( 0.85 ) );
+					surf.metalness = float( 0.9 );
+					surf.roughness = float( 0.32 ).add( scorch.mul( 0.3 ) ).add( panelLines.mul( 0.2 ) );
+					surf.height.push( ( q ) => latticeLines( q, 2.3, 0.02 ).mul( - 1.4 ) );
+					surf.bumpScale = 0.0014;
+
+				} ],
+
+				[ 'Pixel Matrix', ( surf ) => {
+
+					const p = positionLocal;
+
+					const inner = smoothstep( 0.08, 0.12, faceEdgeDist( p ) );
+					const gaps = latticeLines( p, 11, 0.1 );
+					const pixelColor = spectrum( cells( p, 11, 2.9 ) );
+					const blink = step( 0.42, sin( time.mul( 1.8 ).add( cells( p, 11, 2.9 ).mul( 44 ) ) ).mul( 0.5 ).add( 0.5 ) );
+
+					surf.color = color( 0x101014 );
+					surf.roughness = float( 0.25 );
+					surf.clearcoat = float( 1 );
+					surf.clearcoatRoughness = float( 0.08 );
+					surf.emissive = pixelColor.mul( blink ).mul( gaps.oneMinus() ).mul( inner ).mul( 0.85 );
+
+				} ],
+
+				[ 'Asphalt', ( surf ) => {
+
+					const p = positionLocal;
+
+					const aggregate = cells( p, 70, 1.8 );
+					const sparkleBits = glints( p, 130, 5 ).clamp();
+					const top = normalLocal.y.clamp();
+					const dash = step( p.x.abs(), float( 0.05 ) ).mul( step( fract( p.z.mul( 3.2 ) ), float( 0.55 ) ) ).mul( top ).mul( smoothstep( 0.45, 0.5, p.y ) );
+					const wear = fbm( p.mul( 9 ).add( 3.3 ), 2 ).mul( 0.5 ).add( 0.5 );
+
+					surf.color = mix( color( 0x1f2022 ), color( 0x36383b ), aggregate.mul( 0.6 ) );
+					surf.color = mix( surf.color, color( 0xc9990f ), dash.mul( smoothstep( 0.25, 0.6, wear ) ).mul( 0.9 ) );
+					surf.roughness = float( 0.95 );
+					surf.emissive = color( 0xffffff ).mul( sparkleBits ).mul( 0.15 );
+					surf.height.push( ( q ) => mx_cell_noise_float( q.mul( 70 ).add( 1.8 ) ).mul( 1 ) );
+					surf.bumpScale = 0.0018;
+
+				} ],
+
+				[ 'Concrete', ( surf ) => {
+
+					const p = positionLocal;
+
+					const form = smoothstep( 0.05, 0.015, fract( p.y.mul( 3.2 ).add( 0.25 ) ).sub( 0.5 ).abs() ).mul( normalLocal.y.abs().oneMinus() );
+					const pits = mx_worley_noise_float( p.mul( 48 ).add( 8.8 ) ).oneMinus().pow( 5 );
+					const stain = smoothstep( 0.35, 0.75, fbm( vec3( p.x.mul( 4 ), p.y.mul( 1.6 ), p.z.mul( 4 ) ).add( 12.2 ) ).mul( 0.5 ).add( 0.5 ) ).mul( p.y.negate().add( 0.5 ).mul( 0.5 ).clamp() );
+
+					surf.color = mix( color( 0x94948e ), color( 0xa8a8a2 ), fbm( p.mul( 3 ) ).mul( 0.5 ).add( 0.5 ) );
+					surf.color = surf.color.mul( pits.mul( 0.35 ).oneMinus() ).mul( stain.mul( 0.3 ).oneMinus() );
+					surf.color = mix( surf.color, color( 0x7d7d78 ), form.mul( 0.5 ) );
+					surf.roughness = float( 0.88 ).add( stain.mul( 0.1 ) );
+					surf.height.push( ( q ) => mx_worley_noise_float( q.mul( 48 ).add( 8.8 ) ).oneMinus().pow( 5 ).mul( - 1.6 ).add( smoothstep( 0.05, 0.015, fract( q.y.mul( 3.2 ).add( 0.25 ) ).sub( 0.5 ).abs() ).mul( - 1 ) ) );
+					surf.bumpScale = 0.0018;
+
+				} ],
+
+				// fantasy ------------------------------------------------------
+
+				[ 'Runestone', ( surf ) => {
+
+					const p = positionLocal;
+
+					const carve = smoothstep( 0.09, 0.035, fract( fbm( p.mul( 2.4 ).add( 7.7 ) ).mul( 3 ) ).sub( 0.5 ).abs() ).mul( smoothstep( 0.05, 0.09, faceEdgeDist( p ) ) );
+					const pulse = sin( time.mul( 1.1 ).add( p.y.mul( 2 ) ) ).mul( 0.3 ).add( 0.7 );
+					const stone = fbm( p.mul( 5 ).add( 3.2 ) ).mul( 0.5 ).add( 0.5 );
+
+					surf.color = mix( color( 0x565a5e ), color( 0x6e7276 ), stone );
+					surf.color = mix( surf.color, color( 0x1e3a38 ), carve.mul( 0.8 ) );
+					surf.roughness = float( 0.8 ).add( carve.mul( 0.1 ) );
+					surf.emissive = color( 0x2fd8c4 ).mul( carve ).mul( pulse ).mul( 1.4 );
+					surf.height.push( ( q ) => smoothstep( 0.09, 0.035, fract( fbm( q.mul( 2.4 ).add( 7.7 ) ).mul( 3 ) ).sub( 0.5 ).abs() ).mul( - 2.6 ).add( mx_noise_float( q.mul( 30 ) ).mul( 0.4 ) ) );
+					surf.bumpScale = 0.002;
+
+				} ],
+
+				[ 'Spirit Glass', ( surf ) => {
+
+					const p = positionLocal;
+					const refracted = refract( viewIncident(), normalWorld, 1 / 1.35 );
+
+					const wisps = fbm( p.add( refracted.mul( 0.25 ) ).mul( 4 ).add( vec3( time.mul( 0.12 ), time.mul( 0.08 ), 0 ) ) ).abs().oneMinus().clamp().pow( 3 );
+					const drift = fbm( p.add( refracted.mul( 0.5 ) ).mul( 2.5 ).add( vec3( 0, time.mul( 0.1 ), 0 ) ) ).mul( 0.5 ).add( 0.5 );
+
+					surf.color = color( 0xdcece8 );
+					surf.roughness = float( 0.05 );
+					surf.emissive = color( 0x8fe8d4 ).mul( wisps.mul( 0.5 ).add( drift.mul( 0.12 ) ) ).mul( 0.6 );
+					surf.aoStrength = 0.15;
+					surf.props = { transmission: 0.95, thickness: 0.7, ior: 1.35, attenuationColor: new THREE.Color( 0xbfe4da ), attenuationDistance: 2.2, envMapIntensity: 1.1 };
+
+				} ],
+
+				[ 'Void', ( surf ) => {
+
+					const p = positionLocal;
+					const refracted = refract( viewIncident(), normalWorld, 1 / 1.6 );
+
+					const starsNear = glints( p.add( refracted.mul( 0.35 ) ), 55, 22 ).clamp();
+					const starsFar = glints( p.add( refracted.mul( 0.85 ) ).add( 9.9 ), 38, 16 ).clamp();
+					const fog = fbm( p.add( refracted.mul( 0.6 ) ).mul( 2.4 ).add( 5.5 ) ).mul( 0.5 ).add( 0.5 );
+
+					surf.color = color( 0x020204 );
+					surf.roughness = float( 0.04 );
+					surf.clearcoat = float( 1 );
+					surf.clearcoatRoughness = float( 0.03 );
+					surf.emissive = color( 0xe8f2ff ).mul( starsNear ).add( color( 0xb0c4ff ).mul( starsFar ).mul( 0.6 ) ).add( color( 0x2a1245 ).mul( fog ).mul( 0.4 ) );
+					surf.aoStrength = 0.2;
+
+				} ],
+
+				[ 'Nebula', ( surf ) => {
+
+					const p = positionLocal;
+					const refracted = refract( viewIncident(), normalWorld, 1 / 1.5 );
+
+					const cloudA = smoothstep( 0.25, 0.9, fbm( p.add( refracted.mul( 0.3 ) ).mul( 3.2 ).add( 11.1 ), 4 ).mul( 0.5 ).add( 0.5 ) );
+					const cloudB = smoothstep( 0.3, 0.85, fbm( p.add( refracted.mul( 0.55 ) ).mul( 2.6 ).add( 31.4 ), 4 ).mul( 0.5 ).add( 0.5 ) );
+					const stars = glints( p.add( refracted.mul( 0.4 ) ), 65, 18 ).clamp();
+
+					surf.color = color( 0x0a0612 );
+					surf.roughness = float( 0.08 );
+					surf.clearcoat = float( 1 );
+					surf.clearcoatRoughness = float( 0.05 );
+					surf.emissive = color( 0xd85fa8 ).mul( cloudA ).mul( 0.5 )
+						.add( color( 0x4a5fd8 ).mul( cloudB ).mul( 0.45 ) )
+						.add( color( 0xffe9d4 ).mul( stars ) );
+					surf.aoStrength = 0.2;
+
+				} ],
+
+				[ 'Eldritch', ( surf ) => {
+
+					const p = positionLocal;
+
+					const writheA = sin( p.dot( vec3( 5, 2, 3 ) ).add( fbm( p.mul( 2.6 ).add( vec3( 0, time.mul( 0.16 ), 0 ) ) ).mul( 5.5 ) ) );
+					const writheB = sin( p.dot( vec3( - 3, 4, 5 ) ).add( fbm( p.mul( 3.1 ).add( vec3( time.mul( 0.11 ), 0, 0 ) ) ).mul( 4.5 ) ) );
+					const ridgeA = smoothstep( 0.75, 0.98, writheA );
+					const ridgeB = smoothstep( 0.78, 0.98, writheB );
+
+					surf.color = mix( color( 0x150921 ), color( 0x2b1240 ), writheA.mul( 0.5 ).add( 0.5 ).mul( 0.6 ) );
+					surf.roughness = float( 0.32 ).sub( ridgeA.mul( 0.15 ) );
+					surf.clearcoat = float( 0.6 );
+					surf.clearcoatRoughness = float( 0.15 );
+					surf.emissive = color( 0x8f2fd8 ).mul( ridgeA ).mul( 0.55 ).add( color( 0x2fae62 ).mul( ridgeB ).mul( 0.3 ) );
+					surf.height.push( ( q ) => sin( q.dot( vec3( 5, 2, 3 ) ).add( fbm( q.mul( 2.6 ).add( vec3( 0, time.mul( 0.16 ), 0 ) ) ).mul( 5.5 ) ) ).mul( 1 ) );
+					surf.bumpScale = 0.0018;
+
+				} ],
+
+				[ 'Ember', ( surf ) => {
+
+					const p = positionLocal;
+
+					const charFlakes = fbm( p.mul( 14 ).add( 6.2 ), 2 ).mul( 0.5 ).add( 0.5 );
+					const windPos = p.add( vec3( sin( time.mul( 0.6 ) ).mul( 0.1 ), time.mul( - 0.22 ), 0 ) );
+					const sparks = glints( windPos, 60, 22 ).clamp();
+					const sparksFine = glints( windPos.add( 4.4 ), 110, 14 ).clamp();
+					const glowWorms = veins( p, 5, 13, 9.3 ).mul( sin( time.mul( 1.4 ).add( p.x.mul( 6 ) ) ).mul( 0.35 ).add( 0.65 ) );
+
+					surf.color = mix( color( 0x191310 ), color( 0x2c211b ), charFlakes );
+					surf.roughness = float( 0.85 );
+					surf.emissive = color( 0xff7a1e ).mul( sparks ).mul( 1.8 ).add( color( 0xffb43e ).mul( sparksFine ).mul( 1.2 ) ).add( color( 0x7a2408 ).mul( glowWorms ).mul( 0.22 ) );
+					surf.height.push( ( q ) => fbm( q.mul( 14 ).add( 6.2 ), 2 ).mul( 1.5 ) );
+					surf.bumpScale = 0.0022;
+
+				} ],
+
+				[ 'Stormcloud', ( surf ) => {
+
+					const p = positionLocal;
+
+					const billow = fbm( p.mul( 2.8 ).add( vec3( time.mul( 0.08 ), 0, time.mul( 0.05 ) ) ), 4 ).mul( 0.5 ).add( 0.5 );
+					const deep = smoothstep( 0.3, 0.75, billow ).oneMinus();
+					const strike = step( 0.978, mx_noise_float( vec3( time.mul( 3.6 ), 2.2, 0 ) ).mul( 0.5 ).add( 0.5 ) );
+					const bolts = veins( p.add( floor( time.mul( 3.6 ) ) ), 3.4, 12 );
+
+					surf.color = mix( color( 0x39424e ), color( 0x8a95a4 ), billow );
+					surf.roughness = float( 0.8 );
+					surf.sheen = color( 0xaeb9c8 ).mul( 0.5 );
+					surf.sheenRoughness = float( 0.7 );
+					surf.emissive = color( 0xd8e6ff ).mul( strike ).mul( bolts.mul( 2.2 ).add( deep.mul( 0.5 ) ) )
+						.add( color( 0x6a7688 ).mul( deep ).mul( 0.08 ) );
+					surf.height.push( ( q ) => fbm( q.mul( 2.8 ).add( vec3( time.mul( 0.08 ), 0, time.mul( 0.05 ) ) ), 4 ).mul( 2.4 ) );
+					surf.bumpScale = 0.004;
+
+				} ],
+
+				[ 'Inkwell', ( surf ) => {
+
+					const p = positionLocal;
+
+					const flow = fbm( p.mul( 3.2 ).add( vec3( 0, time.mul( 0.1 ), time.mul( 0.06 ) ) ) );
+					const tendrils = flow.abs().oneMinus().clamp().pow( 7 );
+					const diffusion = flow.abs().oneMinus().clamp().pow( 2.5 );
+
+					surf.color = mix( color( 0xf4f1ea ), color( 0x565866 ), diffusion.mul( 0.45 ) );
+					surf.color = mix( surf.color, color( 0x0d0e16 ), tendrils.mul( 0.95 ) );
+					surf.roughness = float( 0.08 );
+					surf.clearcoat = float( 1 );
+					surf.clearcoatRoughness = float( 0.04 );
+
+				} ],
+
+				[ 'Aetherium', ( surf ) => {
+
+					const p = positionLocal;
+
+					const flowVeins = veins( p, 3.8, 10, 17.1 );
+					const pulse = sin( time.mul( 1.3 ).add( p.dot( vec3( 2, 3, 1 ) ) ) ).mul( 0.25 ).add( 0.75 );
+					const brush = mx_noise_float( vec3( p.x.mul( 200 ), p.y.mul( 5 ), p.z.mul( 200 ) ) ).abs();
+
+					surf.color = mix( color( 0xb4c2d4 ), color( 0xd6e2ee ), fbm( p.mul( 4 ) ).mul( 0.5 ).add( 0.5 ) );
+					surf.metalness = float( 1 );
+					surf.roughness = float( 0.18 ).add( brush.mul( 0.1 ) );
+					surf.emissive = color( 0x3f8fff ).mul( flowVeins ).mul( pulse ).mul( 1.1 );
+					surf.height.push( ( q ) => veins( q, 3.8, 10, 17.1 ).mul( - 1.4 ) );
+					surf.bumpScale = 0.0012;
+
+				} ],
+
+				[ 'Cursebound', ( surf ) => {
+
+					const p = positionLocal;
+
+					const web = veins( p, 3.3, 11, 13.7 );
+					const cadence = time.mul( 2.4 );
+					const beat = smoothstep( 0.7, 1, sin( cadence ) ).add( smoothstep( 0.7, 1, sin( cadence.sub( 0.7 ) ) ).mul( 0.55 ) ).mul( 0.75 ).add( 0.25 );
+
+					surf.color = mix( color( 0x0b090d ), color( 0x1c1218 ), fbm( p.mul( 4.4 ) ).mul( 0.5 ).add( 0.5 ) );
+					surf.roughness = float( 0.5 );
+					surf.clearcoat = float( 0.15 );
+					surf.clearcoatRoughness = float( 0.2 );
+					surf.props = { envMapIntensity: 0.6 };
+					surf.emissive = color( 0xd81a22 ).mul( web ).mul( beat ).mul( 1.5 );
+					surf.height.push( ( q ) => veins( q, 3.3, 11, 13.7 ).mul( - 1.8 ) );
+					surf.bumpScale = 0.0016;
+
+				} ],
+
+				[ 'Clockwork', ( surf ) => {
+
+					const p = positionLocal;
+
+					const radial = p.sub( normalLocal.mul( p.dot( normalLocal ) ) ).length();
+					const engraving = sin( radial.mul( 130 ).add( fbm( p.mul( 2 ), 2 ).mul( 0.6 ) ) ).mul( 0.5 ).add( 0.5 );
+					const rosette = sin( radial.mul( 34 ).sub( 2 ) ).mul( 0.5 ).add( 0.5 );
+
+					surf.color = mix( color( 0xbf9440 ), color( 0xd8bc6a ), engraving.mul( 0.45 ).add( rosette.mul( 0.15 ) ) );
+					surf.metalness = float( 1 );
+					surf.roughness = float( 0.13 ).add( engraving.mul( 0.1 ) );
+					surf.props = { envMapIntensity: 1.4 };
+					surf.height.push( ( q ) => {
+
+						const r = q.sub( normalLocal.mul( q.dot( normalLocal ) ) ).length();
+						return sin( r.mul( 130 ).add( fbm( q.mul( 2 ), 2 ).mul( 0.6 ) ) ).mul( 0.45 );
+
+					} );
+					surf.bumpScale = 0.0008;
+
+				} ],
+
+				// celestial ----------------------------------------------------
+
+				[ 'Mars', ( surf ) => {
+
+					const p = positionLocal;
+
+					const regolith = fbm( p.mul( 4.2 ).add( 3.7 ) ).mul( 0.5 ).add( 0.5 );
+					const basins = smoothstep( 0.55, 0.8, fbm( p.mul( 2 ).add( 19.3 ) ).mul( 0.5 ).add( 0.5 ) );
+					const craters = mx_worley_noise_float( p.mul( 16 ).add( 6.4 ) ).oneMinus().pow( 5 );
+
+					surf.color = mix( color( 0xb5502c ), color( 0x7d3018 ), regolith );
+					surf.color = mix( surf.color, color( 0x59230f ), basins.mul( 0.6 ) );
+					surf.color = surf.color.mul( craters.mul( 0.3 ).oneMinus() );
+					surf.roughness = float( 0.92 );
+					surf.height.push( ( q ) => mx_worley_noise_float( q.mul( 16 ).add( 6.4 ) ).oneMinus().pow( 5 ).mul( - 1.8 ).add( fbm( q.mul( 8 ), 2 ).mul( 0.6 ) ) );
+					surf.bumpScale = 0.002;
+
+				} ],
+
+				[ 'Jupiter', ( surf ) => {
+
+					const p = positionLocal;
+
+					const turbulence = fbm( vec3( p.x.mul( 2 ), p.y.mul( 6 ), p.z.mul( 2 ) ).add( 8.1 ) ).mul( 2.4 );
+					const belt = sin( p.y.mul( 15 ).add( turbulence ) ).mul( 0.5 ).add( 0.5 );
+					const zone = sin( p.y.mul( 7 ).sub( turbulence.mul( 0.4 ) ).add( 2 ) ).mul( 0.5 ).add( 0.5 );
+					const spot = smoothstep( 0.1, 0.32, vec3( p.x.sub( 0.28 ).mul( 1.4 ), p.y.add( 0.18 ).mul( 3.2 ), p.z.sub( 0.38 ) ).length() ).oneMinus();
+
+					surf.color = mix( color( 0xdab183 ), color( 0x8a4c26 ), belt );
+					surf.color = mix( surf.color, color( 0xeee0c8 ), zone.mul( 0.35 ) );
+					surf.color = mix( surf.color, color( 0xc2492a ), spot.mul( 0.9 ) );
+					surf.roughness = float( 0.6 );
+					surf.sheen = color( 0xe8d0a8 ).mul( 0.3 );
+					surf.sheenRoughness = float( 0.6 );
+					surf.height.push( ( q ) => sin( q.y.mul( 15 ).add( fbm( vec3( q.x.mul( 2 ), q.y.mul( 6 ), q.z.mul( 2 ) ).add( 8.1 ) ).mul( 2.4 ) ) ).mul( 0.4 ) );
+					surf.bumpScale = 0.0006;
+
+				} ],
+
+				[ 'Neptune', ( surf ) => {
+
+					const p = positionLocal;
+
+					const belts = sin( p.y.mul( 9 ).add( fbm( p.mul( 2.4 ).add( 4.4 ) ).mul( 1.8 ) ) ).mul( 0.5 ).add( 0.5 );
+					const storms = smoothstep( 0.55, 0.8, fbm( vec3( p.x.mul( 2.6 ), p.y.mul( 12 ), p.z.mul( 2.6 ) ).add( 12.7 ) ).mul( 0.5 ).add( 0.5 ) )
+						.mul( smoothstep( 0.58, 0.78, fbm( p.mul( 2.1 ).add( 6 ) ).mul( 0.5 ).add( 0.5 ) ) );
+
+					surf.color = mix( color( 0x2244c8 ), color( 0x4a72e8 ), belts );
+					surf.color = mix( surf.color, color( 0xdce8f8 ), storms.mul( 0.85 ) );
+					surf.roughness = float( 0.5 );
+					surf.emissive = color( 0x3f6ae8 ).mul( fresnel( 2.4 ) ).mul( 0.25 );
+					surf.sheen = color( 0x7a9af2 ).mul( 0.35 );
+					surf.sheenRoughness = float( 0.55 );
+
+				} ],
+
+				[ 'Moon', ( surf ) => {
+
+					const p = positionLocal;
+
+					const maria = smoothstep( 0.5, 0.75, fbm( p.mul( 1.9 ).add( 27.2 ) ).mul( 0.5 ).add( 0.5 ) );
+					const cratersL = mx_worley_noise_float( p.mul( 9 ).add( 3.1 ) ).oneMinus().pow( 6 );
+					const cratersS = mx_worley_noise_float( p.mul( 26 ).add( 8.8 ) ).oneMinus().pow( 6 );
+					const dust = glints( p, 120, 4 ).clamp();
+
+					surf.color = mix( color( 0x9d9d99 ), color( 0x6b6b68 ), maria );
+					surf.color = surf.color.mul( cratersL.mul( 0.25 ).add( cratersS.mul( 0.2 ) ).oneMinus() );
+					surf.roughness = float( 0.96 );
+					surf.emissive = color( 0xffffff ).mul( dust ).mul( 0.08 );
+					surf.height.push( ( q ) => mx_worley_noise_float( q.mul( 9 ).add( 3.1 ) ).oneMinus().pow( 6 ).mul( - 3 ).add( mx_worley_noise_float( q.mul( 26 ).add( 8.8 ) ).oneMinus().pow( 6 ).mul( - 1.4 ) ) );
+					surf.bumpScale = 0.0035;
+
+				} ],
+
+				[ 'Sol', ( surf ) => {
+
+					const p = positionLocal;
+
+					const granules = mx_worley_noise_float( p.mul( 22 ).add( vec3( 0, time.mul( 0.25 ), 0 ) ) );
+					const spots = smoothstep( 0.62, 0.85, fbm( p.mul( 3.4 ).add( 5.1 ) ).mul( 0.5 ).add( 0.5 ) );
+					const flare = fresnel( 1.8 );
+
+					surf.color = color( 0x1a0c04 );
+					surf.roughness = float( 0.6 );
+					surf.emissive = mix( color( 0xff9a1e ), color( 0xffd96a ), granules ).mul( granules.mul( 0.6 ).add( 0.75 ) )
+						.mul( spots.mul( 0.85 ).oneMinus() )
+						.add( color( 0xff6a00 ).mul( flare ).mul( 0.9 ) )
+						.mul( 1.35 );
+					surf.aoStrength = 0.1;
+
+				} ],
+
+				// misc ---------------------------------------------------------
+
+				[ 'Origami Paper', ( surf ) => {
+
+					const p = positionLocal;
+
+					const facetId = floor( fbm( p.mul( 2.2 ).add( 9.9 ), 2 ).mul( 4 ) );
+					const facetTone = fract( facetId.mul( 0.37 ) );
+					const fibers = mx_noise_float( vec3( p.x.mul( 220 ), p.y.mul( 40 ), p.z.mul( 220 ) ) ).abs();
+
+					surf.color = mix( color( 0xf7f5f0 ), color( 0xe9e6dd ), facetTone.mul( 0.7 ) );
+					surf.color = surf.color.mul( fibers.mul( 0.06 ).oneMinus() );
+					surf.roughness = float( 0.65 );
+					surf.sheen = color( 0xffffff ).mul( 0.25 );
+					surf.sheenRoughness = float( 0.8 );
+					surf.height.push( ( q ) => floor( fbm( q.mul( 2.2 ).add( 9.9 ), 2 ).mul( 4 ) ).mul( 1.5 ) );
+					surf.bumpScale = 0.0035;
+
+				} ],
+
+				[ 'Denim', ( surf ) => {
+
+					const p = positionLocal;
+					const bevel = bevelMask();
+
+					const twill = fract( p.dot( vec3( 1, 0.6, 1 ) ).mul( 34 ) ).sub( 0.5 ).abs().mul( 2 );
+					const weft = mx_noise_float( vec3( p.x.mul( 180 ), p.y.mul( 20 ), p.z.mul( 180 ) ) ).mul( 0.5 ).add( 0.5 );
+					const fade = bevel.mul( 0.7 ).add( smoothstep( 0.35, 0.5, p.y ).mul( 0.3 ) );
+					const stitch = smoothstep( 0.012, 0.004, faceEdgeDist( p ).sub( 0.075 ).abs() ).mul( step( fract( p.dot( vec3( 6, 6, 6 ) ) ), float( 0.55 ) ) );
+
+					surf.color = mix( color( 0x2c3e68 ), color( 0x1e2c4d ), twill );
+					surf.color = mix( surf.color, color( 0x7288b0 ), fade.mul( weft ).mul( 0.55 ) );
+					surf.color = mix( surf.color, color( 0xd88a3a ), stitch.mul( 0.9 ) );
+					surf.roughness = float( 0.92 );
+					surf.sheen = color( 0x8ea2c4 ).mul( 0.3 );
+					surf.sheenRoughness = float( 0.75 );
+					surf.height.push( ( q ) => fract( q.dot( vec3( 1, 0.6, 1 ) ).mul( 34 ) ).sub( 0.5 ).abs().mul( 2 ).add( mx_noise_float( vec3( q.x.mul( 180 ), q.y.mul( 20 ), q.z.mul( 180 ) ) ).mul( 0.4 ) ) );
+					surf.bumpScale = 0.0022;
+
+				} ],
+
+				[ 'Terracotta', ( surf ) => {
+
+					const p = positionLocal;
+
+					const kiln = fbm( p.mul( 2.2 ).add( 14.4 ) ).mul( 0.5 ).add( 0.5 );
+					const bloom = smoothstep( 0.6, 0.8, fbm( p.mul( 5.5 ).add( 3.3 ) ).mul( 0.5 ).add( 0.5 ) );
+					const grain = mx_noise_float( p.mul( 90 ).add( 7 ) ).mul( 0.5 ).add( 0.5 );
+
+					surf.color = mix( color( 0xb5623c ), color( 0x8a4426 ), kiln );
+					surf.color = mix( surf.color, color( 0xd8b49a ), bloom.mul( 0.3 ) );
+					surf.color = surf.color.mul( grain.mul( 0.1 ).add( 0.93 ) );
+					surf.roughness = float( 0.82 );
+					surf.aoStrength = 0.6;
+					surf.height.push( ( q ) => mx_noise_float( q.mul( 60 ) ).mul( 0.7 ).add( fbm( q.mul( 9 ), 2 ).mul( 0.5 ) ) );
+					surf.bumpScale = 0.0012;
+
+				} ],
+
+				[ 'Delftware', ( surf ) => {
+
+					const p = positionLocal;
+
+					const motif = smoothstep( 0.52, 0.72, fbm( p.mul( 4.6 ).add( 21.1 ) ).mul( 0.5 ).add( 0.5 ) );
+					const detail = fbm( p.mul( 15 ).add( 5.5 ), 2 ).mul( 0.5 ).add( 0.5 );
+					const border = smoothstep( 0.012, 0.004, faceEdgeDist( p ).sub( 0.09 ).abs() );
+					const paint = motif.mul( detail.mul( 0.5 ).add( 0.5 ) ).add( border.mul( 0.85 ) ).clamp();
+
+					surf.color = mix( color( 0xf5f4ef ), color( 0x2a4fb0 ), paint );
+					surf.roughness = float( 0.1 ).add( paint.mul( 0.06 ) );
+					surf.clearcoat = float( 1 );
+					surf.clearcoatRoughness = float( 0.06 );
+					surf.props = { envMapIntensity: 1.15 };
+
+				} ],
+
+				[ 'Mosaic', ( surf ) => {
+
+					const p = positionLocal;
+
+					const grout = latticeLines( p, 7.5, 0.09 );
+					const tile = cells( p, 7.5, 5.2 );
+					const tileColor = mix( mix( color( 0x1e5f8a ), color( 0x3fa8c4 ), step( 0.33, tile ) ), color( 0xd8b95e ), step( 0.85, tile ) );
+
+					surf.color = mix( tileColor, color( 0xd3cfc5 ), grout.mul( 0.9 ) );
+					surf.roughness = mix( float( 0.15 ), float( 0.8 ), grout );
+					surf.clearcoat = grout.oneMinus().mul( 0.8 );
+					surf.clearcoatRoughness = float( 0.08 );
+					surf.height.push( ( q ) => latticeLines( q, 7.5, 0.09 ).mul( - 1.8 ) );
+					surf.bumpScale = 0.0025;
+
+				} ],
+
+				[ 'Velvet', ( surf ) => {
+
+					const p = positionLocal;
+
+					const press = bands( p, vec3( 0.7, 0.4, 1 ), 6, 2.2, 8.8 );
+					const nap = fresnel( 1.6 );
+
+					surf.color = mix( color( 0x581020 ), color( 0x7c1830 ), press.mul( 0.5 ) );
+					surf.color = mix( surf.color, color( 0xc4506a ), nap.mul( 0.85 ) );
+					surf.roughness = float( 0.95 );
+					surf.sheen = color( 0xd8607a ).mul( 0.9 );
+					surf.sheenRoughness = float( 0.5 );
+					surf.aoStrength = 0.65;
+					surf.height.push( ( q ) => mx_noise_float( q.mul( 150 ) ).mul( 0.3 ) );
+					surf.bumpScale = 0.0006;
+
+				} ],
+
+				[ 'Chameleon Paint', ( surf ) => {
+
+					const p = positionLocal;
+					const facing = normalWorld.dot( viewIncident().negate() ).clamp();
+
+					const flip = facing.pow( 1.6 );
+					const flakes = glints( p, 160, 7 ).clamp();
+
+					surf.color = mix( color( 0x8a2fd8 ), color( 0x14c8b4 ), flip );
+					surf.color = mix( surf.color, color( 0xd8b43e ), smoothstep( 0.35, 0.55, facing ).mul( smoothstep( 0.75, 0.55, facing ) ).mul( 0.5 ) );
+					surf.metalness = float( 0.85 );
+					surf.roughness = float( 0.16 );
+					surf.clearcoat = float( 1 );
+					surf.clearcoatRoughness = float( 0.04 );
+					surf.emissive = color( 0xffffff ).mul( flakes ).mul( 0.18 );
+					surf.props = { envMapIntensity: 1.25 };
+
+				} ],
+
+				[ 'Packed Snow', ( surf ) => {
+
+					const p = positionLocal;
+
+					const lumps = fbm( p.mul( 7 ).add( 11.7 ), 2 ).mul( 0.5 ).add( 0.5 );
+					const sparkleBits = glints( p, 110, 14 ).clamp();
+					const depth = attribute( 'pipAo' ).add( lumps.mul( 0.3 ) );
+
+					surf.color = mix( color( 0xf7fafd ), color( 0xbdd8f0 ), depth.mul( 0.6 ) );
+					surf.roughness = float( 0.72 );
+					surf.emissive = color( 0xffffff ).mul( sparkleBits ).mul( 0.5 ).add( color( 0xcfe4ff ).mul( fresnel( 2.5 ) ).mul( 0.1 ) );
+					surf.sheen = color( 0xe8f2ff ).mul( 0.4 );
+					surf.sheenRoughness = float( 0.7 );
+					surf.height.push( ( q ) => fbm( q.mul( 7 ).add( 11.7 ), 2 ).mul( 1.6 ).add( mx_noise_float( q.mul( 60 ) ).mul( 0.4 ) ) );
+					surf.bumpScale = 0.0024;
+
+				} ],
+
+				[ 'Plasma Orb', ( surf ) => {
+
+					const p = positionLocal;
+
+					const dir = p.normalize();
+					const filaments = fbm( dir.mul( 4.5 ).add( vec3( time.mul( 0.3 ), 0, time.mul( 0.2 ) ) ) ).abs().oneMinus().clamp().pow( 9 );
+					const reach = smoothstep( 0.15, 0.4, p.length() ).mul( smoothstep( 0.75, 0.5, p.length() ).mul( 0.5 ).add( 0.5 ) );
+					const jitter = mx_noise_float( vec3( time.mul( 6 ), 4.4, 0 ) ).mul( 0.2 ).add( 0.85 );
+
+					surf.color = color( 0x0c0a14 );
+					surf.roughness = float( 0.03 );
+					surf.clearcoat = float( 1 );
+					surf.clearcoatRoughness = float( 0.02 );
+					surf.emissive = mix( color( 0x7a4fff ), color( 0xe84fd8 ), fbm( dir.mul( 3 ) ).mul( 0.5 ).add( 0.5 ) ).mul( filaments ).mul( reach ).mul( jitter ).mul( 2.4 );
+					surf.aoStrength = 0.2;
+
+				} ],
+
+				[ 'Blueprint', ( surf ) => {
+
+					const p = positionLocal;
+
+					const gridFine = latticeLines( p, 16, 0.03 ).mul( 0.35 );
+					const gridBold = latticeLines( p, 4, 0.025 ).mul( 0.7 );
+					const outlines = latticeLines( p.add( fbm( p.mul( 1.5 ), 1 ).mul( 0.08 ) ), 2.2, 0.03 ).mul( step( 0.5, cells( p, 2.2, 7.3 ) ) );
+					const paper = mx_noise_float( p.mul( 70 ) ).mul( 0.5 ).add( 0.5 );
+
+					surf.color = mix( color( 0x1a4a9a ), color( 0x123a80 ), paper.mul( 0.5 ) );
+					surf.color = mix( surf.color, color( 0xdce8f4 ), gridFine.add( gridBold ).add( outlines ).clamp() );
+					surf.roughness = float( 0.7 );
+					surf.sheen = color( 0x8fb4e8 ).mul( 0.2 );
+					surf.sheenRoughness = float( 0.8 );
+
+				} ],
+
+				[ 'Kintsugi', ( surf ) => {
+
+					const p = positionLocal;
+
+					const seams = smoothstep( 0.75, 0.92, veins( p, 2.1, 6, 16.6 ) );
+					const ceramicTone = fbm( p.mul( 3.5 ).add( 8.2 ) ).mul( 0.5 ).add( 0.5 );
+
+					surf.color = mix( color( 0x212024 ), color( 0x312f35 ), ceramicTone );
+					surf.color = mix( surf.color, color( 0xe0b54a ), seams );
+					surf.metalness = seams.mul( 1 );
+					surf.roughness = mix( float( 0.4 ), float( 0.14 ), seams );
+					surf.clearcoat = float( 0.6 );
+					surf.clearcoatRoughness = float( 0.12 );
+					surf.emissive = color( 0xd8a83e ).mul( seams ).mul( 0.12 );
+					surf.height.push( ( q ) => smoothstep( 0.75, 0.92, veins( q, 2.1, 6, 16.6 ) ).mul( 1.6 ) );
+					surf.bumpScale = 0.0018;
+
+				} ],
+
+				[ 'Chalkboard', ( surf ) => {
+
+					const p = positionLocal;
+
+					const scribbles = veins( p, 5.5, 14, 23.2 ).mul( smoothstep( 0.45, 0.65, fbm( p.mul( 2.8 ).add( 6.1 ) ).mul( 0.5 ).add( 0.5 ) ) );
+					const smears = smoothstep( 0.4, 0.8, fbm( vec3( p.x.mul( 3 ), p.y.mul( 8 ), p.z.mul( 3 ) ).add( 13.7 ) ).mul( 0.5 ).add( 0.5 ) );
+					const dust = mx_noise_float( p.mul( 100 ) ).mul( 0.5 ).add( 0.5 );
+
+					surf.color = mix( color( 0x243029 ), color( 0x2e3b33 ), smears.mul( 0.6 ) );
+					surf.color = surf.color.add( color( 0xe8e8e2 ).mul( scribbles ).mul( 0.75 ) );
+					surf.color = surf.color.add( color( 0xd8d8d2 ).mul( smears ).mul( dust ).mul( 0.08 ) );
+					surf.roughness = float( 0.95 );
+					surf.aoStrength = 0.5;
+
+				} ]
+
+			];
+
+			// finishes -------------------------------------------------------------
+
+			const FINISHES = [
+
+				[ 'Etched', ( surf ) => {
+
+					const groove = etchMask( positionLocal );
+
+					surf.color = mix( surf.color, surf.color.mul( 0.45 ), groove );
+					surf.roughness = surf.roughness.add( groove.mul( 0.3 ) );
+					surf.height.push( ( q ) => etchMask( q ).mul( - 6 ) );
+
+				} ],
+
+				[ 'Neon', ( surf, def ) => {
+
+					const glowColor = color( SUITS[ def.suit ].neon );
+
+					const flicker = mx_noise_float( vec3( time.mul( 1.4 ), 3.7, 0 ) ).mul( 0.1 ).add( 0.92 );
+					const pulse = sin( time.mul( 1.7 ) ).mul( 0.08 ).add( 0.92 );
+
+					const edges = bevelMask().pow( 1.4 ).mul( 1.1 );
+					const inset = smoothstep( 0.002, 0.012, faceEdgeDist( positionLocal ).sub( 0.095 ).abs() ).oneMinus().mul( 0.8 );
+					const sockets = smoothstep( 0.1, 0.45, attribute( 'pipAo' ) ).mul( 0.9 );
+
+					addEmissive( surf, glowColor.mul( edges.add( inset ).add( sockets ) ).mul( flicker.mul( pulse ) ) );
+
+				} ],
+
+				[ 'Aurora', ( surf ) => {
+
+					const p = positionLocal;
+
+					const drift = time.mul( 0.18 );
+					const flow = fbm( vec3( p.x.mul( 1.7 ), p.y.mul( 2.6 ), p.z.mul( 1.7 ) ).add( vec3( drift, drift.mul( 0.55 ), drift.negate().mul( 0.4 ) ) ) );
+					const curtain = sin( p.dot( vec3( 2.8, 6.2, 3.6 ) ).add( flow.mul( 4.2 ) ).add( time.mul( 0.5 ) ) ).mul( 0.5 ).add( 0.5 ).pow( 1.6 );
+					const shift = sin( flow.mul( 2.2 ).add( time.mul( 0.27 ) ) ).mul( 0.5 ).add( 0.5 );
+
+					let auroraColor = mix( color( 0x2ee88a ), color( 0x35b9e6 ), shift );
+					auroraColor = mix( auroraColor, color( 0x5f6cf0 ), curtain.mul( shift ).mul( 0.45 ) );
+
+					addEmissive( surf, auroraColor.mul( curtain.mul( fresnel( 1.8 ).mul( 0.6 ).add( 0.35 ) ).mul( 1.35 ) ) );
+					surf.sheen = auroraColor.mul( 0.5 );
+					surf.sheenRoughness = float( 0.5 );
+
+				} ],
+
+				[ 'Gold Leaf', ( surf ) => {
+
+					const p = positionLocal;
+
+					const leaf = smoothstep( 0.5, 0.56, fbm( p.mul( 4.6 ).add( 7.2 ) ).mul( 0.5 ).add( 0.5 ) );
+					const crinkle = fbm( p.mul( 40 ).add( 3 ), 2 );
+
+					surf.color = mix( surf.color, mix( color( 0xc79728 ), color( 0xf2d377 ), crinkle.mul( 0.5 ).add( 0.5 ) ), leaf );
+					surf.metalness = mix( surf.metalness, float( 1 ), leaf );
+					surf.roughness = mix( surf.roughness, float( 0.18 ).add( crinkle.abs().mul( 0.1 ) ), leaf );
+					surf.height.push( ( q ) => smoothstep( 0.5, 0.56, fbm( q.mul( 4.6 ).add( 7.2 ) ).mul( 0.5 ).add( 0.5 ) ).mul( 1 ).add( fbm( q.mul( 40 ).add( 3 ), 2 ).mul( 0.3 ) ) );
+					surf.bumpScale = Math.max( surf.bumpScale, 0.0015 );
+
+				} ],
+
+				[ 'Filigree', ( surf ) => {
+
+					const p = positionLocal;
+
+					const warp = fbm( p.mul( 2.4 ).add( 5.7 ) ).mul( 0.2 );
+					const scrolls = veins( p.add( warp ), 4.6, 13, 26.2 ).mul( smoothstep( 0.05, 0.09, faceEdgeDist( p ) ) );
+
+					surf.color = mix( surf.color, color( 0xd4d9e2 ), scrolls );
+					surf.metalness = mix( surf.metalness, float( 1 ), scrolls );
+					surf.roughness = mix( surf.roughness, float( 0.14 ), scrolls );
+					surf.height.push( ( q ) => veins( q.add( fbm( q.mul( 2.4 ).add( 5.7 ) ).mul( 0.2 ) ), 4.6, 13, 26.2 ).mul( 1.5 ) );
+					surf.bumpScale = Math.max( surf.bumpScale, 0.0012 );
+
+				} ],
+
+				[ 'Rime Frost', ( surf ) => {
+
+					const p = positionLocal;
+					const bevel = bevelMask();
+
+					const reach = bevel.add( fbm( p.mul( 6 ).add( 3.4 ) ).mul( 0.5 ).add( 0.5 ).mul( 0.45 ) ).sub( 0.35 ).clamp();
+					const crystals = glints( p, 100, 12 ).clamp().mul( reach );
+
+					surf.color = mix( surf.color, color( 0xeef6fb ), reach.mul( 0.85 ) );
+					surf.roughness = mix( surf.roughness, float( 0.75 ), reach );
+					addEmissive( surf, color( 0xffffff ).mul( crystals ).mul( 0.5 ) );
+					surf.height.push( ( q ) => {
+
+						const e = q.abs().sub( 0.5 - BEVEL ).div( BEVEL ).clamp();
+						const b = e.x.mul( e.y ).add( e.y.mul( e.z ) ).add( e.z.mul( e.x ) ).clamp();
+						return b.add( fbm( q.mul( 6 ).add( 3.4 ) ).mul( 0.5 ).add( 0.5 ).mul( 0.45 ) ).sub( 0.35 ).clamp().mul( mx_noise_float( q.mul( 90 ) ).mul( 0.5 ).add( 0.75 ) ).mul( 1.4 );
+
+					} );
+					surf.bumpScale = Math.max( surf.bumpScale, 0.002 );
+
+				} ],
+
+				[ 'Dew', ( surf ) => {
+
+					const p = positionLocal;
+
+					const seedField = cells( p, 26, 4.4 );
+					const beadShape = mx_worley_noise_float( p.mul( 26 ).add( 4.4 ) ).oneMinus().pow( 5 );
+					const beads = beadShape.mul( step( 0.45, seedField ) );
+
+					surf.color = surf.color.mul( beads.mul( 0.15 ).oneMinus() );
+					surf.roughness = mix( surf.roughness, float( 0.02 ), beads.clamp() );
+					addEmissive( surf, color( 0xffffff ).mul( glints( p, 150, 8 ).clamp() ).mul( beads.clamp() ).mul( 0.6 ) );
+					surf.height.push( ( q ) => mx_worley_noise_float( q.mul( 26 ).add( 4.4 ) ).oneMinus().pow( 5 ).mul( step( 0.45, mx_cell_noise_float( q.mul( 26 ).add( 4.4 ) ) ) ).mul( 3 ) );
+					surf.bumpScale = Math.max( surf.bumpScale, 0.003 );
+
+				} ],
+
+				[ 'Craquelure', ( surf ) => {
+
+					const p = positionLocal;
+
+					const web = veins( p, 7.5, 12, 31.9 );
+
+					surf.color = mix( surf.color, surf.color.mul( 0.35 ), web );
+					surf.roughness = surf.roughness.add( web.mul( 0.25 ) );
+					surf.height.push( ( q ) => veins( q, 7.5, 12, 31.9 ).mul( - 1.6 ) );
+					surf.bumpScale = Math.max( surf.bumpScale, 0.0014 );
+
+				} ],
+
+				[ 'Barnacles', ( surf ) => {
+
+					const p = positionLocal;
+
+					const zone = smoothstep( 0.15, - 0.25, p.y.add( fbm( vec3( p.x, 0, p.z ).mul( 5 ) ).mul( 0.12 ) ) );
+					const shells = mx_worley_noise_float( p.mul( 22 ).add( 7.7 ) ).oneMinus().pow( 3 ).mul( zone );
+					const tideLine = smoothstep( 0.05, 0.01, p.y.add( fbm( vec3( p.x, 0, p.z ).mul( 5 ) ).mul( 0.12 ) ).sub( 0.15 ).abs() );
+
+					surf.color = mix( surf.color, mix( color( 0x9a958a ), color( 0xcfc9bb ), shells ), shells.clamp().mul( 0.9 ) );
+					surf.color = mix( surf.color, color( 0x4a5548 ), tideLine.mul( 0.4 ) );
+					surf.roughness = mix( surf.roughness, float( 0.9 ), zone.mul( 0.8 ) );
+					surf.height.push( ( q ) => mx_worley_noise_float( q.mul( 22 ).add( 7.7 ) ).oneMinus().pow( 3 ).mul( smoothstep( 0.15, - 0.25, q.y ) ).mul( 3.5 ) );
+					surf.bumpScale = Math.max( surf.bumpScale, 0.0035 );
+
+				} ],
+
+				[ 'Runic Ward', ( surf ) => {
+
+					const p = positionLocal;
+
+					const angle = atan( p.z, p.x ).add( time.mul( 0.35 ) );
+					const belt = smoothstep( 0.26, 0.16, p.y.abs() );
+					const script = smoothstep( 0.16, 0.06, fract( fbm( vec3( angle.mul( 1.2 ), p.y.mul( 5 ), 2.5 ), 2 ).mul( 2.5 ) ).sub( 0.5 ).abs() );
+					const ward = script.mul( belt );
+
+					surf.color = mix( surf.color, color( 0x1c1408 ), belt.mul( 0.25 ) );
+					addEmissive( surf, mix( color( 0xffb43e ), color( 0x2fd8c4 ), sin( time.mul( 0.8 ) ).mul( 0.5 ).add( 0.5 ) ).mul( ward ).mul( 2.2 ) );
+
+				} ],
+
+				[ 'Blessed', ( surf ) => {
+
+					const p = positionLocal;
+
+					const halo = fresnel( 2.2 );
+					const fromAbove = normalLocal.y.clamp().mul( smoothstep( 0.1, 0.5, p.y ) );
+					const breath = sin( time.mul( 0.9 ) ).mul( 0.15 ).add( 0.85 );
+
+					surf.color = mix( surf.color, color( 0xfff4dc ), fromAbove.mul( 0.15 ) );
+					addEmissive( surf, color( 0xffd98a ).mul( halo ).mul( 0.55 ).add( color( 0xfff2d0 ).mul( fromAbove ).mul( 0.3 ) ).mul( breath ) );
+					surf.sheen = color( 0xffe9b8 ).mul( 0.4 );
+					surf.sheenRoughness = float( 0.5 );
+
+				} ],
+
+				[ 'Smolder', ( surf ) => {
+
+					const p = positionLocal;
+					const bevel = bevelMask();
+
+					const embers = bevel.mul( fbm( p.mul( 8 ).sub( vec3( 0, time.mul( 0.4 ), 0 ) ) ).mul( 0.5 ).add( 0.5 ).pow( 2 ) );
+					const char = bevel.mul( 0.7 );
+
+					surf.color = mix( surf.color, color( 0x140d08 ), char );
+					surf.roughness = surf.roughness.add( char.mul( 0.3 ) ).clamp( 0, 1 );
+					addEmissive( surf, mix( color( 0xff3a08 ), color( 0xffa43e ), embers ).mul( embers ).mul( 2 ) );
+
+				} ],
+
+				[ 'Oil Slick', ( surf ) => {
+
+					const p = positionLocal;
+					const facing = normalWorld.dot( viewIncident().negate() ).clamp();
+
+					const film = spectrum( fbm( p.mul( 3 ).add( vec3( time.mul( 0.12 ), 0, 0 ) ) ).mul( 0.8 ).add( facing.mul( 1.3 ) ) );
+
+					surf.roughness = surf.roughness.mul( 0.45 );
+					surf.clearcoat = float( 1 );
+					surf.clearcoatRoughness = float( 0.04 );
+					addEmissive( surf, film.mul( facing.oneMinus().mul( 0.5 ).add( 0.18 ) ).mul( 0.55 ) );
+
+				} ],
+
+				[ 'Static', ( surf ) => {
+
+					const p = positionLocal;
+
+					const snow = step( 0.68, mx_noise_float( p.mul( 240 ).add( floor( time.mul( 22 ) ).mul( 13.7 ) ) ).mul( 0.5 ).add( 0.5 ) );
+					const zone = smoothstep( 0.35, 0.7, fbm( p.mul( 3 ).add( floor( time.mul( 3 ) ).mul( 0.41 ) ) ).mul( 0.5 ).add( 0.5 ) );
+
+					addEmissive( surf, color( 0xe8f0ff ).mul( snow ).mul( zone ).mul( 0.9 ) );
+					surf.color = surf.color.mul( zone.mul( 0.2 ).oneMinus() );
+
+				} ],
+
+				[ 'Glitch', ( surf ) => {
+
+					const p = positionLocal;
+
+					const row = floor( p.y.mul( 12 ) );
+					const jump = step( 0.88, mx_cell_noise_float( vec3( row, floor( time.mul( 2.6 ) ), 2 ) ) );
+					const shard = step( 0.5, mx_cell_noise_float( vec3( floor( p.x.mul( 6 ).add( time ) ), row, 5 ) ) );
+
+					surf.color = mix( surf.color, surf.color.mul( vec3( 1.5, 0.4, 0.4 ) ), jump.mul( shard ).mul( 0.9 ) );
+					surf.color = mix( surf.color, surf.color.mul( vec3( 0.3, 1.3, 1.4 ) ), jump.mul( shard.oneMinus() ).mul( 0.9 ) );
+					addEmissive( surf, vec3( 0.9, 0.2, 0.25 ).mul( jump ).mul( shard ).mul( 0.4 ).add( vec3( 0.15, 0.8, 0.9 ).mul( jump ).mul( shard.oneMinus() ).mul( 0.4 ) ) );
+
+				} ],
+
+				[ 'Starlight', ( surf ) => {
+
+					const p = positionLocal;
+
+					const twinkleA = glints( p, 80, 14 ).clamp().mul( sin( time.mul( 2.4 ).add( cells( p, 40 ).mul( 40 ) ) ).mul( 0.4 ).add( 0.6 ) );
+					const twinkleB = glints( p.add( 7.7 ), 130, 10 ).clamp().mul( sin( time.mul( 3.1 ).add( cells( p, 60, 3 ).mul( 40 ) ) ).mul( 0.4 ).add( 0.6 ) );
+
+					addEmissive( surf, color( 0xeaf2ff ).mul( twinkleA ).add( color( 0xcfe0ff ).mul( twinkleB ).mul( 0.7 ) ).mul( 1.4 ) );
+
+				} ],
+
+				[ 'Moonlit', ( surf ) => {
+
+					const p = positionLocal;
+
+					const clouds = smoothstep( 0.35, 0.75, fbm( p.mul( 2.2 ).add( vec3( time.mul( 0.07 ), 0, time.mul( 0.05 ) ) ) ).mul( 0.5 ).add( 0.5 ) );
+
+					surf.color = mix( surf.color, surf.color.mul( vec3( 0.72, 0.82, 1.05 ) ), 0.6 );
+					surf.color = surf.color.mul( clouds.mul( 0.3 ).oneMinus() );
+					addEmissive( surf, color( 0x9fc4ff ).mul( fresnel( 2.4 ) ).mul( clouds.oneMinus() ).mul( 0.35 ) );
+
+				} ],
+
+				[ 'Biolume', ( surf ) => {
+
+					const p = positionLocal;
+
+					const plankton = smoothstep( 0.45, 0.75, fbm( p.mul( 9 ).add( 6.6 ), 2 ).mul( 0.5 ).add( 0.5 ) );
+					const pooling = attribute( 'pipAo' ).mul( 1.2 ).add( plankton.mul( 0.6 ) ).clamp();
+					const wave = sin( time.mul( 1.1 ).sub( p.x.mul( 3 ) ).sub( p.z.mul( 2 ) ) ).mul( 0.35 ).add( 0.65 );
+					const specks = glints( p, 120, 10 ).clamp();
+
+					addEmissive( surf, color( 0x24e8cf ).mul( pooling ).mul( wave ).mul( 0.7 ).add( color( 0x6af2e0 ).mul( specks ).mul( wave ) ) );
+
+				} ],
+
+				[ 'Haunted', ( surf ) => {
+
+					const p = positionLocal;
+
+					const wisps = smoothstep( 0.3, 0.8, fbm( p.mul( 2.4 ).add( vec3( time.mul( 0.09 ), time.mul( 0.05 ), 0 ) ) ).mul( 0.5 ).add( 0.5 ) );
+					const dim = step( 0.982, mx_noise_float( vec3( time.mul( 4.4 ), 8.8, 0 ) ).mul( 0.5 ).add( 0.5 ) );
+
+					surf.color = surf.color.mul( wisps.mul( 0.5 ).oneMinus() ).mul( dim.mul( 0.4 ).oneMinus() );
+					addEmissive( surf, color( 0x8fa4c4 ).mul( wisps ).mul( wisps.oneMinus() ).mul( 0.22 ) );
+
+				} ],
+
+				[ 'Pinstripe', ( surf ) => {
+
+					const p = positionLocal;
+					const d = faceEdgeDist( p );
+
+					const stripeA = smoothstep( 0.008, 0.002, d.sub( 0.1 ).abs() );
+					const stripeB = smoothstep( 0.005, 0.001, d.sub( 0.13 ).abs() );
+					const e = vec3( 0.5 ).sub( p.abs() );
+					const tick = smoothstep( 0.01, 0.003, e.x.add( e.y ).add( e.z ).sub( d.mul( 2 ) ).abs() ).mul( smoothstep( 0.13, 0.15, d ) ).mul( smoothstep( 0.22, 0.19, d ) );
+					const paint = stripeA.add( stripeB.mul( 0.8 ) ).add( tick.mul( 0.9 ) ).clamp();
+
+					surf.color = mix( surf.color, color( 0xe8ddba ), paint );
+					surf.roughness = mix( surf.roughness, float( 0.3 ), paint );
+
+				} ],
+
+				[ 'Camo', ( surf ) => {
+
+					const p = positionLocal;
+
+					const zones = floor( fbm( p.mul( 3.2 ).add( 17.7 ) ).mul( 0.5 ).add( 0.5 ).mul( 3.99 ) );
+					const isOlive = step( 0.5, zones ).mul( step( zones, float( 1.5 ) ) );
+					const isTan = step( 1.5, zones ).mul( step( zones, float( 2.5 ) ) );
+					const isBrown = step( 2.5, zones );
+
+					surf.color = mix( surf.color, color( 0x4a5230 ), isOlive.mul( 0.9 ) );
+					surf.color = mix( surf.color, color( 0xa8926a ), isTan.mul( 0.9 ) );
+					surf.color = mix( surf.color, color( 0x4f3a26 ), isBrown.mul( 0.9 ) );
+					surf.roughness = surf.roughness.mul( 0.3 ).add( 0.6 );
+
+				} ],
+
+				[ 'Graffiti', ( surf ) => {
+
+					const p = positionLocal;
+
+					const tagPink = fbm( p.mul( 2 ).add( 9.4 ) ).abs().oneMinus().clamp().pow( 5 );
+					const tagCyan = fbm( p.mul( 2.4 ).add( 31.2 ) ).abs().oneMinus().clamp().pow( 5 );
+					const overspray = fbm( p.mul( 2 ).add( 9.4 ) ).abs().oneMinus().clamp().pow( 2 ).mul( 0.3 );
+					const drips = mx_noise_float( vec3( p.x.mul( 40 ), p.y.mul( 3 ), p.z.mul( 40 ) ) ).mul( 0.5 ).add( 0.5 ).pow( 3 ).mul( smoothstep( 0.2, 0.6, tagPink ) );
+
+					surf.color = mix( surf.color, color( 0xe82fb4 ), tagPink.add( drips.mul( 0.6 ) ).clamp().mul( 0.9 ) );
+					surf.color = mix( surf.color, color( 0x2fc4e8 ), tagCyan.mul( 0.85 ) );
+					surf.color = mix( surf.color, color( 0xd85fc4 ), overspray );
+					surf.roughness = mix( surf.roughness, float( 0.45 ), tagPink.add( tagCyan ).clamp() );
+
+				} ],
+
+				[ 'Chipped Paint', ( surf ) => {
+
+					const p = positionLocal;
+
+					const chips = smoothstep( 0.52, 0.58, fbm( p.mul( 6.5 ).add( 13.1 ) ).mul( 0.5 ).add( 0.5 ) );
+					const paintMask = chips.oneMinus();
+					const rim = smoothstep( 0.5, 0.53, fbm( p.mul( 6.5 ).add( 13.1 ) ).mul( 0.5 ).add( 0.5 ) ).mul( paintMask );
+
+					surf.color = mix( surf.color, mix( color( 0x3f7ac4 ), color( 0x5f96d8 ), fbm( p.mul( 9 ) ).mul( 0.5 ).add( 0.5 ) ), paintMask );
+					surf.color = mix( surf.color, color( 0x1e3a5f ), rim.mul( 0.7 ) );
+					surf.roughness = mix( surf.roughness, float( 0.4 ), paintMask );
+					surf.metalness = surf.metalness.mul( chips );
+					surf.height.push( ( q ) => smoothstep( 0.52, 0.58, fbm( q.mul( 6.5 ).add( 13.1 ) ).mul( 0.5 ).add( 0.5 ) ).oneMinus().mul( 1.4 ) );
+					surf.bumpScale = Math.max( surf.bumpScale, 0.0016 );
+
+				} ],
+
+				[ 'Scorched', ( surf ) => {
+
+					const p = positionLocal;
+
+					const char = creep( p, vec3( 0.5, 0.55, 0.5 ), 1.05, 0.4, 3.3 );
+					const frontier = char.mul( char.oneMinus() ).mul( 4 );
+					const flakes = fbm( p.mul( 18 ).add( 4 ), 2 ).mul( 0.5 ).add( 0.5 );
+
+					surf.color = mix( surf.color, mix( color( 0x0f0b08 ), color( 0x241a12 ), flakes ), char.mul( 0.95 ) );
+					surf.roughness = mix( surf.roughness, float( 0.95 ), char );
+					surf.metalness = surf.metalness.mul( char.oneMinus() );
+					addEmissive( surf, color( 0xff6a1e ).mul( frontier ).mul( sin( time.mul( 1.8 ) ).mul( 0.2 ).add( 0.55 ) ).mul( 0.5 ) );
+					surf.height.push( ( q ) => creep( q, vec3( 0.5, 0.55, 0.5 ), 1.05, 0.4, 3.3 ).mul( fbm( q.mul( 18 ).add( 4 ), 2 ) ).mul( 1.2 ) );
+					surf.bumpScale = Math.max( surf.bumpScale, 0.0018 );
+
+				} ],
+
+				[ 'Lacquer', ( surf ) => {
+
+					const pooling = attribute( 'pipAo' );
+
+					surf.color = mix( surf.color, surf.color.mul( color( 0xb06a20 ) ), pooling.mul( 0.5 ).add( 0.12 ) );
+					surf.roughness = surf.roughness.mul( 0.3 );
+					surf.clearcoat = float( 1 );
+					surf.clearcoatRoughness = float( 0.02 );
+					surf.props = Object.assign( {}, surf.props, { envMapIntensity: 1.3 } );
+
+				} ],
+
+				[ 'Pearlescent', ( surf ) => {
+
+					const p = positionLocal;
+					const facing = normalWorld.dot( viewIncident().negate() ).clamp();
+
+					const shimmer = spectrum( facing.mul( 1.2 ).add( fbm( p.mul( 5 ) ).mul( 0.25 ) ) ).mul( 0.5 ).add( 0.5 );
+
+					surf.color = mix( surf.color, shimmer, 0.3 );
+					surf.roughness = surf.roughness.mul( 0.5 );
+					surf.clearcoat = float( 1 );
+					surf.clearcoatRoughness = float( 0.05 );
+					surf.props = Object.assign( {}, surf.props, { iridescence: 0.7, iridescenceIOR: 1.3 } );
+
+				} ],
+
+				[ 'Mirror Polish', ( surf ) => {
+
+					surf.color = surf.color.mul( 0.92 );
+					surf.roughness = surf.roughness.mul( 0.06 );
+					surf.clearcoat = float( 1 );
+					surf.clearcoatRoughness = float( 0.02 );
+					surf.height = [];
+					surf.props = Object.assign( {}, surf.props, { envMapIntensity: 1.4 } );
+
+				} ],
+
+				[ 'Sandblast', ( surf ) => {
+
+					const p = positionLocal;
+
+					surf.color = mix( surf.color, surf.color.add( 0.08 ), 0.5 );
+					surf.roughness = surf.roughness.mul( 0.2 ).add( 0.78 );
+					surf.clearcoat = float( 0 );
+					surf.height.push( ( q ) => mx_noise_float( q.mul( 120 ) ).mul( 0.5 ) );
+					surf.bumpScale = Math.max( surf.bumpScale, 0.001 );
+
+				} ],
+
+				[ 'Anodized', ( surf ) => {
+
+					const p = positionLocal;
+
+					const sweep = p.dot( vec3( 0.4, 0.85, 0.3 ) ).mul( 0.75 ).add( 0.5 );
+					const anodic = spectrum( sweep );
+
+					surf.color = mix( surf.color, anodic, 0.72 );
+					surf.metalness = surf.metalness.mul( 0.2 ).add( 0.8 );
+					surf.roughness = surf.roughness.mul( 0.4 ).add( 0.08 );
+					surf.props = Object.assign( {}, surf.props, { envMapIntensity: 1.3 } );
+
+				} ],
+
+				[ 'Circuit Glow', ( surf ) => {
+
+					const p = positionLocal;
+
+					const jitter = fbm( p.mul( 1.8 ).add( 3.1 ), 1 ).mul( 0.06 );
+					const lanes = latticeLines( p.add( jitter ), 8.5, 0.022 ).mul( step( 0.3, cells( p, 8.5, 6.6 ) ) );
+					const packet = sin( p.dot( vec3( 4, 6, 5 ) ).sub( time.mul( 2.6 ) ) ).mul( 0.5 ).add( 0.5 ).pow( 3 );
+
+					surf.color = mix( surf.color, color( 0x10181c ), lanes.mul( 0.4 ) );
+					addEmissive( surf, color( 0x2fd8ff ).mul( lanes ).mul( packet.mul( 1.4 ).add( 0.3 ) ) );
+
+				} ],
+
+				[ 'Ivy', ( surf ) => {
+
+					const p = positionLocal;
+
+					const wander = fbm( p.mul( 2.2 ).add( 8.1 ) ).mul( 0.3 );
+					const tendrils = veins( p.add( wander ), 2.8, 8, 12.4 );
+					const leaves = mx_worley_noise_float( p.mul( 24 ).add( 3.3 ) ).oneMinus().pow( 4 ).mul( smoothstep( 0.25, 0.6, tendrils ) );
+
+					surf.color = mix( surf.color, color( 0x2d5c1c ), tendrils.mul( 0.85 ) );
+					surf.color = mix( surf.color, color( 0x4d8a2e ), leaves.clamp().mul( 0.9 ) );
+					surf.roughness = mix( surf.roughness, float( 0.75 ), tendrils );
+					surf.height.push( ( q ) => veins( q.add( fbm( q.mul( 2.2 ).add( 8.1 ) ).mul( 0.3 ) ), 2.8, 8, 12.4 ).mul( 1.6 ).add( mx_worley_noise_float( q.mul( 24 ).add( 3.3 ) ).oneMinus().pow( 4 ).mul( 1.2 ) ) );
+					surf.bumpScale = Math.max( surf.bumpScale, 0.002 );
+
+				} ],
+
+				[ 'Cobwebs', ( surf ) => {
+
+					const p = positionLocal;
+
+					const cornerDist = p.abs().sub( vec3( 0.5 ) ).length();
+					const proximity = smoothstep( 0.42, 0.1, cornerDist ).pow( 1.4 );
+					const strands = smoothstep( 0.92, 0.99, sin( p.dot( vec3( 26, 31, 22 ) ).add( fbm( p.mul( 4 ) ).mul( 2 ) ) ).abs() );
+					const rings = smoothstep( 0.9, 0.99, sin( cornerDist.mul( 52 ).add( fbm( p.mul( 6 ) ).mul( 1.5 ) ) ).abs() );
+					const web = max( strands, rings ).mul( proximity );
+
+					surf.color = mix( surf.color, color( 0xdcdcd4 ), web.mul( 0.55 ) );
+					surf.roughness = surf.roughness.add( proximity.mul( 0.2 ) ).clamp( 0, 1 );
+					surf.sheen = color( 0xe8e8e0 ).mul( proximity ).mul( 0.4 );
+					surf.sheenRoughness = float( 0.6 );
+
+				} ],
+
+				[ 'Snowdrift', ( surf ) => {
+
+					const p = positionLocal;
+
+					const drift = topCoat( p, 0.3, 0.16, 5.5 );
+					const sparkleBits = glints( p, 110, 12 ).clamp().mul( drift );
+
+					surf.color = mix( surf.color, color( 0xf6fafe ), drift.mul( 0.95 ) );
+					surf.roughness = mix( surf.roughness, float( 0.7 ), drift );
+					surf.metalness = surf.metalness.mul( drift.oneMinus() );
+					addEmissive( surf, color( 0xffffff ).mul( sparkleBits ).mul( 0.5 ) );
+					surf.height.push( ( q ) => topCoat( q, 0.3, 0.16, 5.5 ).mul( 2.5 ).add( fbm( q.mul( 9 ) ).mul( topCoat( q, 0.3, 0.16, 5.5 ) ).mul( 0.6 ) ) );
+					surf.bumpScale = Math.max( surf.bumpScale, 0.0028 );
+
+				} ],
+
+				[ 'Rain-Slick', ( surf ) => {
+
+					const p = positionLocal;
+					const sides = normalLocal.y.abs().oneMinus();
+
+					const runnels = smoothstep( 0, 0.04, mx_noise_float( vec3( p.x.mul( 60 ), p.y.mul( 3 ), p.z.mul( 60 ) ).add( 6.6 ) ).abs() ).oneMinus().mul( sides );
+					const beads = mx_worley_noise_float( p.mul( 40 ).add( 2.2 ) ).oneMinus().pow( 6 ).mul( normalLocal.y.clamp() );
+
+					surf.color = surf.color.mul( 0.62 );
+					surf.roughness = surf.roughness.mul( 0.2 ).sub( runnels.mul( 0.05 ) ).clamp( 0.02, 1 );
+					surf.clearcoat = float( 1 );
+					surf.clearcoatRoughness = float( 0.03 );
+					addEmissive( surf, color( 0xffffff ).mul( glints( p, 140, 6 ).clamp() ).mul( beads.add( runnels ).clamp() ).mul( 0.4 ) );
+					surf.height.push( ( q ) => mx_worley_noise_float( q.mul( 40 ).add( 2.2 ) ).oneMinus().pow( 6 ).mul( 2 ) );
+					surf.bumpScale = Math.max( surf.bumpScale, 0.0015 );
+
+				} ],
+
+				[ 'Dripping Wax', ( surf ) => {
+
+					const p = positionLocal;
+					const sides = normalLocal.y.abs().oneMinus();
+
+					const columns = mx_cell_noise_float( vec3( floor( p.x.mul( 14 ) ), 1, floor( p.z.mul( 14 ) ) ) );
+					const reach = columns.mul( 0.7 ).add( 0.1 );
+					const drip = smoothstep( 0, 0.12, p.y.sub( float( 0.5 ).sub( reach ) ) ).mul( sides );
+					const cap = topCoat( p, 0.36, 0.08, 2.2 );
+					const wax = max( drip, cap );
+
+					surf.color = mix( surf.color, mix( color( 0xf2ead0 ), color( 0xe4d8b4 ), fbm( p.mul( 8 ) ).mul( 0.5 ).add( 0.5 ) ), wax.mul( 0.96 ) );
+					surf.roughness = mix( surf.roughness, float( 0.32 ), wax );
+					surf.metalness = surf.metalness.mul( wax.oneMinus() );
+					addEmissive( surf, color( 0xffe9c0 ).mul( wax ).mul( fresnel( 2.5 ) ).mul( 0.2 ) );
+					surf.height.push( ( q ) => {
+
+						const col = mx_cell_noise_float( vec3( floor( q.x.mul( 14 ) ), 1, floor( q.z.mul( 14 ) ) ) );
+						return smoothstep( 0, 0.12, q.y.sub( float( 0.5 ).sub( col.mul( 0.7 ).add( 0.1 ) ) ) ).mul( 2.6 );
+
+					} );
+					surf.bumpScale = Math.max( surf.bumpScale, 0.003 );
+
+				} ],
+
+				[ 'Tribal Ink', ( surf ) => {
+
+					const p = positionLocal;
+
+					const bold = smoothstep( 0.22, 0.12, fbm( p.mul( 1.7 ).add( 21.5 ) ).abs() );
+					const echo = smoothstep( 0.1, 0.04, fbm( p.mul( 1.7 ).add( 21.5 ) ).abs().sub( 0.34 ).abs() );
+
+					surf.color = mix( surf.color, color( 0x15100c ), bold.add( echo.mul( 0.85 ) ).clamp() );
+					surf.roughness = mix( surf.roughness, float( 0.55 ), bold );
+
+				} ],
+
+				[ 'Mummy Wrap', ( surf ) => {
+
+					const p = positionLocal;
+
+					const wrapA = fract( p.dot( vec3( 0.9, 2.4, 0.5 ) ).add( fbm( p.mul( 3 ) ).mul( 0.15 ) ) );
+					const wrapB = fract( p.dot( vec3( - 0.6, 2.4, 0.9 ) ).add( 0.4 ).add( fbm( p.mul( 3.3 ) ).mul( 0.15 ) ) );
+					const bandA = smoothstep( 0.06, 0.14, wrapA ).mul( smoothstep( 0.92, 0.82, wrapA ) );
+					const bandB = smoothstep( 0.06, 0.14, wrapB ).mul( smoothstep( 0.92, 0.82, wrapB ) );
+					const linen = max( bandA, bandB );
+					const weaveTexture = mx_noise_float( vec3( p.x.mul( 150 ), p.y.mul( 30 ), p.z.mul( 150 ) ) ).mul( 0.5 ).add( 0.5 );
+
+					surf.color = mix( surf.color, mix( color( 0xb5a37e ), color( 0xd4c49e ), weaveTexture ), linen.mul( 0.96 ) );
+					surf.roughness = mix( surf.roughness, float( 0.85 ), linen );
+					surf.metalness = surf.metalness.mul( linen.oneMinus() );
+					surf.height.push( ( q ) => {
+
+						const qa = fract( q.dot( vec3( 0.9, 2.4, 0.5 ) ).add( fbm( q.mul( 3 ) ).mul( 0.15 ) ) );
+						const qb = fract( q.dot( vec3( - 0.6, 2.4, 0.9 ) ).add( 0.4 ).add( fbm( q.mul( 3.3 ) ).mul( 0.15 ) ) );
+						return max( smoothstep( 0.06, 0.14, qa ).mul( smoothstep( 0.92, 0.82, qa ) ), smoothstep( 0.06, 0.14, qb ).mul( smoothstep( 0.92, 0.82, qb ) ) ).mul( 2.2 );
+
+					} );
+					surf.bumpScale = Math.max( surf.bumpScale, 0.0025 );
+
+				} ],
+
+				[ 'Prism Edge', ( surf ) => {
+
+					const p = positionLocal;
+					const bevel = bevelMask();
+
+					const split = spectrum( p.x.add( p.y ).add( p.z ).mul( 1.4 ).add( fresnel( 1.5 ).mul( 1.2 ) ) );
+					const twinkle = glints( p, 90, 10 ).clamp().mul( 0.6 ).add( 0.4 );
+
+					addEmissive( surf, split.mul( bevel.pow( 1.3 ) ).mul( twinkle ).mul( 1.5 ) );
+
+				} ],
+
+				[ 'Eclipse', ( surf ) => {
+
+					const p = positionLocal;
+
+					const orbit = vec3( sin( time.mul( 0.4 ) ).mul( 0.5 ), sin( time.mul( 0.31 ) ).mul( 0.35 ), cos( time.mul( 0.4 ) ).mul( 0.5 ) );
+					const d = p.sub( orbit ).length();
+					const shadow = smoothstep( 0.36, 0.18, d );
+					const corona = smoothstep( 0.05, 0.015, d.sub( 0.36 ).abs() );
+
+					surf.color = surf.color.mul( shadow.mul( 0.85 ).oneMinus() );
+					addEmissive( surf, color( 0xffb45a ).mul( corona ).mul( 0.9 ) );
+
+				} ],
+
+				[ 'Voltage', ( surf ) => {
+
+					const p = positionLocal;
+
+					const frame = floor( time.mul( 8 ) );
+					const arcs = veins( floor( p.mul( 24 ) ).div( 24 ).add( frame.mul( 0.317 ) ), 3.1, 14 );
+					const region = step( 0.6, mx_cell_noise_float( floor( p.mul( 2.2 ) ).add( frame.mul( 1.7 ) ) ) );
+					const live = step( 0.3, mx_cell_noise_float( vec3( frame, 3.3, 7.1 ) ) );
+
+					addEmissive( surf, color( 0x9fd4ff ).mul( arcs ).mul( region ).mul( live ).mul( 3 ).add( color( 0x3f7dff ).mul( fresnel( 2.6 ) ).mul( 0.2 ) ) );
+
+				} ],
+
+				[ 'Enchanted', ( surf ) => {
+
+					const p = positionLocal;
+
+					const sweep = sin( p.dot( vec3( 1.2, 2.4, 0.8 ) ).mul( 2.4 ).sub( time.mul( 1.3 ) ) ).mul( 0.5 ).add( 0.5 ).pow( 2.5 );
+					const risingMotes = glints( p.sub( vec3( 0, time.mul( 0.18 ), 0 ) ), 85, 9 ).clamp();
+
+					addEmissive( surf, mix( color( 0xb44fff ), color( 0xf2e2ff ), sweep ).mul( sweep ).mul( 0.65 ).add( color( 0xd8a8ff ).mul( risingMotes ) ) );
+					surf.clearcoat = float( 1 );
+					surf.clearcoatRoughness = float( 0.05 );
+
+				} ],
+
+				[ 'Toxic', ( surf ) => {
+
+					const p = positionLocal;
+					const sides = normalLocal.y.abs().oneMinus();
+
+					const columns = mx_cell_noise_float( vec3( floor( p.x.mul( 11 ) ), 2, floor( p.z.mul( 11 ) ) ) );
+					const ooze = smoothstep( 0, 0.15, p.y.sub( float( 0.5 ).sub( columns.mul( 0.8 ).add( 0.05 ) ) ) ).mul( sides ).add( topCoat( p, 0.38, 0.06, 8.1 ) ).clamp();
+					const pulse = sin( time.mul( 1.5 ).add( p.y.mul( 5 ) ) ).mul( 0.25 ).add( 0.75 );
+
+					surf.color = mix( surf.color, color( 0x2a4a10 ), ooze.mul( 0.9 ) );
+					surf.roughness = mix( surf.roughness, float( 0.08 ), ooze );
+					addEmissive( surf, color( 0x54e81e ).mul( ooze ).mul( pulse ).mul( 0.85 ) );
+					surf.height.push( ( q ) => {
+
+						const col = mx_cell_noise_float( vec3( floor( q.x.mul( 11 ) ), 2, floor( q.z.mul( 11 ) ) ) );
+						return smoothstep( 0, 0.15, q.y.sub( float( 0.5 ).sub( col.mul( 0.8 ).add( 0.05 ) ) ) ).mul( 2.2 );
+
+					} );
+					surf.bumpScale = Math.max( surf.bumpScale, 0.0026 );
+
+				} ],
+
+				[ 'Honey Glaze', ( surf ) => {
+
+					const p = positionLocal;
+					const sides = normalLocal.y.abs().oneMinus();
+
+					const wobble = mx_noise_float( p.mul( 22 ) ).mul( 0.08 );
+					const columns = mx_cell_noise_float( vec3( floor( p.x.mul( 16 ) ), 3, floor( p.z.mul( 16 ) ) ) ).mul( 0.5 ).add( fbm( vec3( p.x, 0, p.z ).mul( 4 ).add( 3 ) ).mul( 0.25 ).add( 0.25 ) );
+					const drizzle = smoothstep( 0, 0.24, p.y.sub( float( 0.45 ).sub( columns.mul( 0.85 ) ) ).add( wobble ) ).mul( sides ).add( topCoat( p, 0.34, 0.1, 12.7 ) ).clamp();
+
+					surf.color = mix( surf.color, mix( color( 0xb56f10 ), color( 0xe8a83e ), p.y.add( 0.5 ) ), drizzle.mul( 0.9 ) );
+					surf.roughness = mix( surf.roughness, float( 0.04 ), drizzle );
+					surf.clearcoat = float( 1 );
+					surf.clearcoatRoughness = float( 0.03 );
+					addEmissive( surf, color( 0xe8a83e ).mul( drizzle ).mul( fresnel( 2 ).mul( 0.6 ).add( 0.25 ) ).mul( 0.45 ) );
+					surf.height.push( ( q ) => {
+
+						const col = mx_cell_noise_float( vec3( floor( q.x.mul( 16 ) ), 3, floor( q.z.mul( 16 ) ) ) ).mul( 0.5 ).add( fbm( vec3( q.x, 0, q.z ).mul( 4 ).add( 3 ) ).mul( 0.25 ).add( 0.25 ) );
+						return smoothstep( 0, 0.24, q.y.sub( float( 0.45 ).sub( col.mul( 0.85 ) ) ).add( mx_noise_float( q.mul( 22 ) ).mul( 0.08 ) ) ).mul( 1.8 );
+
+					} );
+					surf.bumpScale = Math.max( surf.bumpScale, 0.002 );
+
+				} ],
+
+				// elemental auras ------------------------------------------------
+
+				[ 'Flame Aura', ( surf ) => {
+
+					elementalAura( surf, 0xff4a12, 0xffb43e, vec3( 0, time.mul( - 0.85 ), 0 ), 3.1 );
+
+				} ],
+
+				[ 'Tide Aura', ( surf ) => {
+
+					elementalAura( surf, 0x1e6ae8, 0x4fd8e8, vec3( time.mul( 0.55 ), sin( time.mul( 0.6 ) ).mul( 0.3 ), 0 ), 9.4 );
+
+				} ],
+
+				[ 'Gale Aura', ( surf ) => {
+
+					elementalAura( surf, 0xbfe8dc, 0xe8f6f0, vec3( time.mul( 1.4 ), time.mul( 0.3 ), time.mul( 1.1 ) ), 15.8 );
+
+				} ],
+
+				[ 'Terra Aura', ( surf ) => {
+
+					elementalAura( surf, 0x8a5f2a, 0x9ac44e, vec3( 0, time.mul( 0.18 ), 0 ), 22.6 );
+
+				} ],
+
+				[ 'Void Aura', ( surf ) => {
+
+					const p = positionLocal;
+
+					elementalAura( surf, 0x3a1260, 0x8a3fd8, vec3( sin( time.mul( 0.4 ) ).mul( 0.4 ), time.mul( - 0.25 ), cos( time.mul( 0.4 ) ).mul( 0.4 ) ), 31.3 );
+
+					surf.color = surf.color.mul( 0.6 );
+					addEmissive( surf, color( 0xc9a1f2 ).mul( glints( p.add( vec3( 0, time.mul( 0.1 ), 0 ) ), 70, 8 ).clamp() ).mul( 0.8 ) );
+
+				} ],
+
+				// gem dust -------------------------------------------------------
+
+				[ 'Emerald Dust', ( surf ) => {
+
+					gemDust( surf, 0x2fd88a );
+
+				} ],
+
+				[ 'Ruby Dust', ( surf ) => {
+
+					gemDust( surf, 0xff4a5f );
+
+				} ],
+
+				[ 'Sapphire Dust', ( surf ) => {
+
+					gemDust( surf, 0x4f7dff );
+
+				} ],
+
+				[ 'Amethyst Dust', ( surf ) => {
+
+					gemDust( surf, 0xbe7dff );
+
+				} ],
+
+				[ 'Diamond Dust', ( surf ) => {
+
+					gemDust( surf, 0xf2f6ff );
+
+				} ]
+
+			];
+
+			const MATERIAL_FNS = Object.fromEntries( MATERIALS );
+			const FINISH_FNS = Object.fromEntries( FINISHES );
+
+			function addEmissive( surf, node ) {
+
+				surf.emissive = surf.emissive === null ? node : surf.emissive.add( node );
+
+			}
+
+			// material assembly ------------------------------------------------------
+
+			function buildBodyMaterial( def ) {
+
+				const surf = {
+					color: color( 0xffffff ),
+					roughness: float( 0.5 ),
+					metalness: float( 0 ),
+					emissive: null,
+					clearcoat: null,
+					clearcoatRoughness: null,
+					sheen: null,
+					sheenRoughness: null,
+					height: [],
+					bumpScale: 0.001,
+					aoStrength: 0.55,
+					props: {}
+				};
+
+				try {
+
+					MATERIAL_FNS[ def.material ]( surf );
+					if ( def.finish !== null ) FINISH_FNS[ def.finish ]( surf, def );
+
+				} catch ( e ) {
+
+					console.error( 'dice lab: "' + def.material + '" + "' + def.finish + '" failed:', e );
+					surf.color = color( 0xff00ff );
+
+				}
+
+				const material = new THREE.MeshPhysicalNodeMaterial();
+
+				material.colorNode = surf.color.mul( attribute( 'pipAo' ).mul( surf.aoStrength ).oneMinus() );
+				material.roughnessNode = surf.roughness;
+				material.metalnessNode = surf.metalness;
+
+				if ( surf.emissive !== null ) material.emissiveNode = surf.emissive;
+				if ( surf.clearcoat !== null ) material.clearcoatNode = surf.clearcoat;
+				if ( surf.clearcoatRoughness !== null ) material.clearcoatRoughnessNode = surf.clearcoatRoughness;
+				if ( surf.sheen !== null ) material.sheenNode = surf.sheen;
+				if ( surf.sheenRoughness !== null ) material.sheenRoughnessNode = surf.sheenRoughness;
+				if ( surf.height.length > 0 ) material.normalNode = proceduralBump( ( q ) => surf.height.reduce( ( sum, layer ) => sum.add( layer( q ) ), float( 0 ) ), surf.bumpScale );
+
+				Object.assign( material, surf.props );
+
+				return material;
+
+			}
+
+			// gem pips - view rays refract into each stone and sample veils, zoning
+			// and twinkling glints along the way
+
+			function buildPipMaterial( style, neonBoost ) {
+
+				const material = new THREE.MeshPhysicalNodeMaterial();
+
+				const seed = attribute( 'gemSeed' );
+				const localPos = positionLocal.sub( attribute( 'gemCenter' ) );
+				const incident = viewIncident();
+				const facing = normalWorld.dot( incident.negate() ).clamp();
+				const rim = facing.oneMinus().pow( 3 );
+				const noiseOffset = seed.mul( 43.7 );
+
+				if ( style === 'prism' ) {
+
+					const swirl = fbm( localPos.mul( 26 ).add( noiseOffset ), 2 ).mul( 0.35 );
+					const oil = spectrum( facing.mul( 1.4 ).add( swirl ).add( seed ) );
+
+					material.colorNode = color( 0x08080a );
+					material.metalnessNode = float( 1 );
+					material.roughnessNode = float( 0.12 ).add( fbm( localPos.mul( 40 ), 2 ).abs().mul( 0.08 ) );
+					material.emissiveNode = oil.mul( rim.mul( 0.9 ).add( 0.25 ) ).mul( 0.9 );
+					material.iridescence = 1;
+					material.iridescenceIOR = 1.35;
+					material.envMapIntensity = 1.4;
+
+					if ( neonBoost ) material.emissiveNode = material.emissiveNode.add( oil.mul( sin( time.mul( 1.7 ) ).mul( 0.15 ).add( 0.85 ) ).mul( 0.8 ) );
+
+				} else {
+
+					const suit = SUITS[ style ];
+
+					const shift = seed.sub( 0.5 ).mul( 0.18 );
+					const core = hue( color( suit.core ), shift );
+					const deep = hue( color( suit.deep ), shift );
+					const glowColor = hue( color( suit.glow ), shift );
+
+					const refracted = refract( incident, normalWorld, 1 / suit.ior );
+
+					const veilNear = fbm( localPos.add( refracted.mul( 0.05 ) ).mul( 34 ).add( noiseOffset ) ).mul( 0.5 ).add( 0.5 );
+					const veilFar = fbm( localPos.add( refracted.mul( 0.12 ) ).mul( 21 ).add( noiseOffset ) ).mul( 0.5 ).add( 0.5 );
+					const depthMix = veilNear.mul( 0.6 ).add( veilFar.mul( 0.4 ) );
+
+					const zoning = sin( depthMix.mul( 7 ).add( seed.mul( 20 ) ) ).mul( 0.5 ).add( 0.5 );
+					const silk = smoothstep( 0.4, 0.8, fbm( localPos.mul( 30 ).add( noiseOffset ), 2 ).mul( 0.5 ).add( 0.5 ) ).mul( 0.35 );
+					const sparkle = glints( localPos.add( refracted.mul( 0.08 ) ), 150, 10 ).clamp();
+
+					const interior = mix( deep, core, smoothstep( 0.15, 0.85, depthMix ) ).mul( zoning.mul( 0.3 ).add( 0.8 ) );
+					const through = pmremTexture( envMap, refracted, float( 0.22 ) ).mul( core ).mul( facing.mul( 0.7 ).add( 0.3 ) );
+
+					material.colorNode = mix( deep, core, depthMix.mul( 0.5 ) ).mul( 0.45 ).mul( silk.oneMinus() );
+					material.emissiveNode = through.mul( 0.32 )
+						.add( interior.mul( depthMix ).mul( 0.45 ).mul( facing ) )
+						.add( glowColor.mul( rim ).mul( 0.22 ) )
+						.mul( silk.mul( 0.7 ).oneMinus() )
+						.add( mix( color( 0xffffff ), glowColor, 0.35 ).mul( sparkle ).mul( 0.7 ) );
+					material.roughnessNode = float( 0.09 ).add( veilNear.mul( 0.04 ) );
+					material.ior = suit.ior;
+					material.clearcoat = 1;
+					material.clearcoatRoughness = 0.06;
+					material.envMapIntensity = 1.0;
+
+					if ( neonBoost ) material.emissiveNode = material.emissiveNode.add( glowColor.mul( sin( time.mul( 1.7 ) ).mul( 0.15 ).add( 0.85 ) ).mul( 0.5 ) );
+
+				}
+
+				return material;
+
+			}
+
+			function createPlugMaterial() {
+
+				const material = new THREE.MeshStandardNodeMaterial();
+
+				const radius = positionLocal.yz.length();
+				const rings = sin( radius.mul( 480 ) ).mul( 0.5 ).add( 0.5 );
+				const wear = fbm( positionLocal.mul( 30 ).add( 3 ), 2 ).mul( 0.5 ).add( 0.5 );
+
+				material.colorNode = mix( color( 0x84898f ), color( 0xa7adb4 ), wear );
+				material.metalnessNode = float( 1 );
+				material.roughnessNode = float( 0.32 ).add( rings.mul( 0.2 ) );
+
+				return material;
+
+			}
+
+			// display slab -------------------------------------------------------------
+
+			function createSlab() {
+
+				const reflection = reflector( { resolutionScale: 0.35 } );
+				reflection.target.rotateX( - Math.PI / 2 );
+				reflection.target.position.y = 0.001;
+				scene.add( reflection.target );
+
+				const p = positionWorld;
+
+				reflection.uvNode = reflection.uvNode.add( vec2( mx_noise_float( p.mul( 3.1 ) ), mx_noise_float( p.mul( 3.3 ).add( 11 ) ) ).mul( 0.0015 ) );
+
+				const material = new THREE.MeshPhysicalNodeMaterial();
+
+				const marbleVeins = fbm( vec3( p.x.mul( 0.6 ), p.y.mul( 2 ), p.z.mul( 0.6 ) ).add( 3.7 ), 4 );
+				const marbling = marbleVeins.abs().oneMinus().pow( 12 );
+
+				material.colorNode = mix( color( 0x0f0f13 ), color( 0x15151a ), fbm( p.mul( 0.8 ) ).mul( 0.5 ).add( 0.5 ) ).add( color( 0x3a3f4d ).mul( marbling ).mul( 0.18 ) );
+				material.roughnessNode = float( 0.24 ).add( marbleVeins.mul( 0.04 ) );
+				material.clearcoatNode = float( 1 );
+				material.clearcoatRoughnessNode = float( 0.08 );
+				material.emissiveNode = reflection.rgb.mul( color( 0x96a3b8 ) ).mul( 0.2 );
+
+				material.mrtNode = mrt( { emissive: vec4( 0, 0, 0, 1 ) } );
+
+				const slab = new THREE.Mesh( new RoundedBoxGeometry( 7, 0.5, 7.6, 4, 0.1 ), material );
+				slab.position.y = - 0.25;
+				slab.receiveShadow = true;
+				scene.add( slab );
+
+			}
+
+		</script>
+
+	</body>
+</html>
